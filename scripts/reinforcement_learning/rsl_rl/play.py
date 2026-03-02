@@ -12,11 +12,12 @@
 
 import argparse
 import sys
-
 from isaaclab.app import AppLauncher
 
 # local imports
 import cli_args  # isort: skip
+
+#TODO: Clean up the interface of the inference policy. Wrap it up as a black box controller that can be deployed in the Go2W_Ltrack environment. 
 
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Train an RL agent with RSL-RL.")
@@ -216,15 +217,16 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
     # reset environment
     obs = env.get_observations()
     timestep = 0
+    
     # simulate environment
     while simulation_app.is_running():
         start_time = time.time()
         # run everything in inference mode
         with torch.inference_mode():
             # agent stepping
-            actions = policy(obs)
+            actions = policy(obs) # action is a tensor with shape of (16,)
             # env stepping
-            obs, _, dones, _ = env.step(actions)
+            obs, _, dones, _ = env.step(actions) # obs is a tensor dict with fields "policy" and "critic". Each corresponds to a tensor with all the observations flattened into a 1D vector.
             # reset recurrent states for episodes that have terminated
             policy_nn.reset(dones)
         if args_cli.video:
