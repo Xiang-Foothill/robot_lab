@@ -159,8 +159,8 @@ UNITREE_GO2W_CFG = ArticulationCfg(
             joint_names_expr=["^(?!.*_foot_joint).*"],
             effort_limit_sim=23.5,
             velocity_limit_sim=30.0,
-            stiffness=25.0,
-            damping=0.5,
+            stiffness=70.0,
+            damping=10.0,
             friction=0.0,
         ),
         "wheels": ImplicitActuatorCfg(

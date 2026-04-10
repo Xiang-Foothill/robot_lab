@@ -95,3 +95,107 @@ def command_levels_ang_vel(
             base_velocity_ranges.ang_vel_z = new_ang_vel_z.tolist()
 
     return torch.tensor(base_velocity_ranges.ang_vel_z[1], device=env.device)
+
+def command_levels_lin_vel_range(
+    env: ManagerBasedRLEnv,
+    env_ids: Sequence[int],
+    reward_term_name: str,
+    initial_vel_x: tuple[float, float] = (-0.4, 0.4),
+    final_vel_x: tuple[float, float] = (-1.5, 4.0),
+    initial_vel_y: tuple[float, float] = (-0.02, 0.02),
+    final_vel_y: tuple[float, float] = (-0.2, 0.2),
+    num_steps: int = 10,
+) -> torch.Tensor:
+    """Curriculum that gradually expands linear velocity command ranges.
+
+    Unlike :func:`command_levels_lin_vel` which uses a symmetric multiplier,
+    this function accepts explicit initial and final ranges for each velocity
+    component, allowing asymmetric expansion.
+
+    On each episode boundary, if the average tracking reward exceeds 80% of
+    the reward term weight, the command range is expanded by one step toward
+    the final range. The total expansion takes ``num_steps`` successful
+    episodes.
+    """
+    base_velocity_ranges = env.command_manager.get_term("base_velocity").cfg.ranges
+
+    if env.common_step_counter == 0:
+        env._curr_initial_vel_x = torch.tensor(initial_vel_x, device=env.device)
+        env._curr_final_vel_x = torch.tensor(final_vel_x, device=env.device)
+        env._curr_initial_vel_y = torch.tensor(initial_vel_y, device=env.device)
+        env._curr_final_vel_y = torch.tensor(final_vel_y, device=env.device)
+        env._curr_delta_vel_x = (env._curr_final_vel_x - env._curr_initial_vel_x) / num_steps
+        env._curr_delta_vel_y = (env._curr_final_vel_y - env._curr_initial_vel_y) / num_steps
+
+        # Initialize command ranges to initial values
+        base_velocity_ranges.lin_vel_x = list(initial_vel_x)
+        base_velocity_ranges.lin_vel_y = list(initial_vel_y)
+
+    # avoid updating command curriculum at each step since the maximum command is common to all envs
+    if env.common_step_counter % env.max_episode_length == 0:
+        episode_sums = env.reward_manager._episode_sums[reward_term_name]
+        reward_term_cfg = env.reward_manager.get_term_cfg(reward_term_name)
+
+        # If the tracking reward is above 80% of the maximum, increase the range of commands
+        if torch.mean(episode_sums[env_ids]) / env.max_episode_length_s > 0.8 * reward_term_cfg.weight:
+            new_vel_x = torch.tensor(base_velocity_ranges.lin_vel_x, device=env.device) + env._curr_delta_vel_x
+            new_vel_y = torch.tensor(base_velocity_ranges.lin_vel_y, device=env.device) + env._curr_delta_vel_y
+
+            # Clamp to ensure we don't exceed final ranges
+            new_vel_x = torch.clamp(new_vel_x, min=env._curr_final_vel_x[0], max=env._curr_final_vel_x[1])
+            new_vel_y = torch.clamp(new_vel_y, min=env._curr_final_vel_y[0], max=env._curr_final_vel_y[1])
+
+            # Update ranges
+            base_velocity_ranges.lin_vel_x = new_vel_x.tolist()
+            base_velocity_ranges.lin_vel_y = new_vel_y.tolist()
+
+    return torch.tensor(base_velocity_ranges.lin_vel_x[1], device=env.device)
+
+
+def command_levels_ang_vel_range(
+    env: ManagerBasedRLEnv,
+    env_ids: Sequence[int],
+    reward_term_name: str,
+    initial_ang_vel_z: tuple[float, float] = (-0.4, 0.4),
+    final_ang_vel_z: tuple[float, float] = (-3.14159, 3.14159),
+    num_steps: int = 10,
+) -> torch.Tensor:
+    """Curriculum that gradually expands angular velocity command ranges.
+
+    Unlike :func:`command_levels_ang_vel` which uses a symmetric multiplier,
+    this function accepts explicit initial and final ranges, allowing
+    asymmetric expansion.
+
+    On each episode boundary, if the average tracking reward exceeds 80% of
+    the reward term weight, the command range is expanded by one step toward
+    the final range. The total expansion takes ``num_steps`` successful
+    episodes.
+    """
+    base_velocity_ranges = env.command_manager.get_term("base_velocity").cfg.ranges
+
+    if env.common_step_counter == 0:
+        env._curr_initial_ang_vel_z = torch.tensor(initial_ang_vel_z, device=env.device)
+        env._curr_final_ang_vel_z = torch.tensor(final_ang_vel_z, device=env.device)
+        env._curr_delta_ang_vel_z = (env._curr_final_ang_vel_z - env._curr_initial_ang_vel_z) / num_steps
+
+        # Initialize command ranges to initial values
+        base_velocity_ranges.ang_vel_z = list(initial_ang_vel_z)
+
+    # avoid updating command curriculum at each step since the maximum command is common to all envs
+    if env.common_step_counter % env.max_episode_length == 0:
+        episode_sums = env.reward_manager._episode_sums[reward_term_name]
+        reward_term_cfg = env.reward_manager.get_term_cfg(reward_term_name)
+
+        # If the tracking reward is above 80% of the maximum, increase the range of commands
+        if torch.mean(episode_sums[env_ids]) / env.max_episode_length_s > 0.4 * reward_term_cfg.weight: # be tolerant on angular velocity tracking since it's generally harder to learn
+            new_ang_vel_z = torch.tensor(base_velocity_ranges.ang_vel_z, device=env.device) + env._curr_delta_ang_vel_z
+
+            # Clamp to ensure we don't exceed final ranges
+            new_ang_vel_z = torch.clamp(
+                new_ang_vel_z, min=env._curr_final_ang_vel_z[0], max=env._curr_final_ang_vel_z[1]
+            )
+
+            # Update ranges
+            base_velocity_ranges.ang_vel_z = new_ang_vel_z.tolist()
+
+    return torch.tensor(base_velocity_ranges.ang_vel_z[1], device=env.device)
