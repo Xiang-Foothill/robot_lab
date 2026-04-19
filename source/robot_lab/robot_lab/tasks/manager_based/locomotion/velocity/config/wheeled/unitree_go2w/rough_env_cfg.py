@@ -147,9 +147,9 @@ class UnitreeGo2WRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.rewards.body_lin_acc_l2.params["asset_cfg"].body_names = [self.base_link_name]
 
         # Joint penalties
-        self.rewards.joint_torques_l2.weight = -2.5e-5
+        self.rewards.joint_torques_l2.weight = -0.5e-3
         self.rewards.joint_torques_l2.params["asset_cfg"].joint_names = self.leg_joint_names
-        self.rewards.joint_torques_wheel_l2.weight = 0
+        self.rewards.joint_torques_wheel_l2.weight = -0.25e-4
         self.rewards.joint_torques_wheel_l2.params["asset_cfg"].joint_names = self.wheel_joint_names
         self.rewards.joint_vel_l2.weight = 0
         self.rewards.joint_vel_l2.params["asset_cfg"].joint_names = self.leg_joint_names
@@ -180,7 +180,7 @@ class UnitreeGo2WRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         ]
 
         # Action penalties
-        self.rewards.action_rate_l2.weight = -0.01
+        self.rewards.action_rate_l2.weight = -0.02
 
         # Contact sensor
         self.rewards.undesired_contacts.weight = -12.0 # increase the value of undesired contact penalty to encourage the robot to keep the feet in contact with the ground

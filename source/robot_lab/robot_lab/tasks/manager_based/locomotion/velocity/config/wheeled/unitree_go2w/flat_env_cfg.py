@@ -26,6 +26,10 @@ class UnitreeGo2WFlatEnvCfg(UnitreeGo2WRoughEnvCfg):
         self.scene.height_scanner = None
         self.observations.policy.height_scan = None
         self.observations.critic.height_scan = None
+        
+        #No body-frame velocity observation
+        self.observations.policy.base_lin_vel = None
+        
         # remove gravity from observation
         self.observations.policy.projected_gravity = None
         self.observations.critic.projected_gravity = None
@@ -35,9 +39,10 @@ class UnitreeGo2WFlatEnvCfg(UnitreeGo2WRoughEnvCfg):
         # ------------------------------Commands------------------------------
         """The commands given during training and evaluation.
         Override the default command ranges for the purpose of high-speed locomotion."""
-        self.commands.base_velocity.ranges.lin_vel_x = (-1.5, 5.0)
+        # set a smaller range to make the policy more motor-friendly
+        self.commands.base_velocity.ranges.lin_vel_x = (-4., 4.)
         self.commands.base_velocity.ranges.lin_vel_y = (-0.2, 0.2)
-        self.commands.base_velocity.ranges.ang_vel_z = (-math.pi, math.pi)
+        self.commands.base_velocity.ranges.ang_vel_z = (-math.pi * 2 / 3, math.pi * 2 / 3) 
         
         # reset the base pose and velocity randomly during reset
         #TODO: figure out the physics meaning of roll, pitch yaw here. The current values does not make sense.
