@@ -17,6 +17,52 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
 
+def randomize_observation_delays(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor | None,
+    joint_pos_delay_steps_range: tuple[int, int],
+    joint_vel_delay_steps_range: tuple[int, int],
+    base_ang_vel_delay_steps_range: tuple[int, int],
+):
+    """Randomize per-environment observation delays in physics-step units.
+
+    This term is intended for ``mode=\"reset\"`` domain randomization.
+    """
+
+    from .observations import _ensure_observation_delay_state, reset_observation_delay_buffers
+
+    _ensure_observation_delay_state(env)
+
+    if env_ids is None:
+        env_ids = torch.arange(env.num_envs, device=env.device)
+
+    def _validate_and_resolve_range(step_range: tuple[int, int]) -> tuple[int, int]:
+        low = int(step_range[0])
+        high = int(step_range[1])
+        if low < 0 or high < 0 or high < low:
+            raise ValueError(f"Invalid delay range {step_range}. It must satisfy 0 <= low <= high.")
+        return low, high
+
+    jp_low, jp_high = _validate_and_resolve_range(joint_pos_delay_steps_range)
+    jv_low, jv_high = _validate_and_resolve_range(joint_vel_delay_steps_range)
+    ba_low, ba_high = _validate_and_resolve_range(base_ang_vel_delay_steps_range)
+
+    env._obs_delay_max_steps = max(jp_high, jv_high, ba_high)
+    env._obs_delay_enabled = env._obs_delay_max_steps > 0
+
+    env._obs_delay_joint_pos_steps[env_ids] = torch.randint(
+        jp_low, jp_high + 1, (len(env_ids),), device=env.device, dtype=torch.long
+    )
+    env._obs_delay_joint_vel_steps[env_ids] = torch.randint(
+        jv_low, jv_high + 1, (len(env_ids),), device=env.device, dtype=torch.long
+    )
+    env._obs_delay_base_ang_vel_steps[env_ids] = torch.randint(
+        ba_low, ba_high + 1, (len(env_ids),), device=env.device, dtype=torch.long
+    )
+
+    reset_observation_delay_buffers(env, env_ids)
+
+
 def randomize_rigid_body_inertia(
     env: ManagerBasedEnv,
     env_ids: torch.Tensor | None,

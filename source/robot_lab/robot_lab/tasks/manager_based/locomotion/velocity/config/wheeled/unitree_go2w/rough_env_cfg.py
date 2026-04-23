@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from isaaclab.managers import RewardTermCfg as RewTerm
+from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils import configclass
 
@@ -79,7 +80,9 @@ class UnitreeGo2WRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.scene.height_scanner_base.prim_path = "{ENV_REGEX_NS}/Robot/" + self.base_link_name
 
         # ------------------------------Observations------------------------------
-        self.observations.policy.joint_pos.func = mdp.joint_pos_rel_without_wheel
+        self.observations.policy.base_ang_vel.func = mdp.base_ang_vel_delayed
+        self.observations.policy.joint_pos.func = mdp.joint_pos_rel_without_wheel_delayed
+        self.observations.policy.joint_vel.func = mdp.joint_vel_rel_delayed
         self.observations.policy.joint_pos.params["wheel_asset_cfg"] = SceneEntityCfg(
             "robot", joint_names=self.wheel_joint_names
         )
@@ -131,6 +134,21 @@ class UnitreeGo2WRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         ]
         self.events.randomize_com_positions.params["asset_cfg"].body_names = [self.base_link_name]
         self.events.randomize_apply_external_force_torque.params["asset_cfg"].body_names = [self.base_link_name]
+        # Randomize observation delays per reset (physics-step units).
+        # dt=0.005 -> 5-30 ms corresponds to 1-6 steps.
+        setattr(
+            self.events,
+            "randomize_observation_delays",
+            EventTerm(
+                func=mdp.randomize_observation_delays,
+                mode="reset",
+                params={
+                    "joint_pos_delay_steps_range": (1, 3),
+                    "joint_vel_delay_steps_range": (1, 3),
+                    "base_ang_vel_delay_steps_range": (1, 3),
+                },
+            ),
+        )
 
         # ------------------------------Rewards------------------------------
         # General
@@ -147,7 +165,7 @@ class UnitreeGo2WRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.rewards.body_lin_acc_l2.params["asset_cfg"].body_names = [self.base_link_name]
 
         # Joint penalties
-        self.rewards.joint_torques_l2.weight = -0.5e-3
+        self.rewards.joint_torques_l2.weight = -0.75e-3
         self.rewards.joint_torques_l2.params["asset_cfg"].joint_names = self.leg_joint_names
         self.rewards.joint_torques_wheel_l2.weight = -0.25e-4
         self.rewards.joint_torques_wheel_l2.params["asset_cfg"].joint_names = self.wheel_joint_names
@@ -180,7 +198,7 @@ class UnitreeGo2WRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         ]
 
         # Action penalties
-        self.rewards.action_rate_l2.weight = -0.02
+        self.rewards.action_rate_l2.weight = -0.015
 
         # Contact sensor
         self.rewards.undesired_contacts.weight = -12.0 # increase the value of undesired contact penalty to encourage the robot to keep the feet in contact with the ground
