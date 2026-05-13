@@ -43,3 +43,15 @@ class UnitreeGo2WFlatPPORunnerCfg(UnitreeGo2WRoughPPORunnerCfg):
 
         self.max_iterations = 5000
         self.experiment_name = "unitree_go2w_flat"
+
+
+@configclass
+class UnitreeGo2WSmoothSteerPPORunnerCfg(UnitreeGo2WFlatPPORunnerCfg):
+    def __post_init__(self):
+        super().__post_init__()
+
+        self.max_iterations = 4000
+        self.experiment_name = "unitree_go2w_smooth_steer"
+        # lower LR + tighter KL for fine-tuning from flat checkpoint
+        self.algorithm.learning_rate = 1.0e-4
+        self.algorithm.desired_kl = 0.005
