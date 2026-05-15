@@ -17,7 +17,6 @@ class UnitreeGo2WSmoothSteerEnvCfg(UnitreeGo2WFlatEnvCfg):
         super().__post_init__()
 
         self.commands.base_velocity = mdp.UniformDifferentialCommandCfg(
-            asset_name="robot",
             resampling_time_range=(10.0, 10.0),
             ranges=mdp.UniformDifferentialCommandCfg.Ranges(
                 lin_acc_x=(-2.0, 2.0),

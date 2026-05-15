@@ -693,7 +693,8 @@ def track_lin_acc_x_exp(
     """Reward tracking of longitudinal acceleration command using exponential kernel."""
     asset: RigidObject = env.scene[asset_cfg.name]
     ax_cmd = env.command_manager.get_command(command_name)[:, 0]
-    ax_actual = asset.data.root_lin_acc_b[:, 0]
+    root_lin_acc_b = quat_apply_inverse(asset.data.root_quat_w, asset.data.body_lin_acc_w[:, 0, :])
+    ax_actual = root_lin_acc_b[:, 0]
     error = torch.square(ax_cmd - ax_actual)
     reward = torch.exp(-error / std**2)
     reward *= torch.clamp(-env.scene["robot"].data.projected_gravity_b[:, 2], 0, 0.7) / 0.7
