@@ -19,6 +19,7 @@ BLEND_MARGIN = 0.9
 KP_V = 1.5
 AX_MAX = 2.0
 WZ_MAX = np.pi / 3
+V_MAX = 1.5
 
 
 class _SpeedProfile:
@@ -60,7 +61,7 @@ class _RacelineProjector:
 
 class AccelPursuitPlanner:
     def __init__(self, raceline_npz, lookahead_m=LOOKAHEAD_M, v_straight=V_STRAIGHT,
-                 v_corner=V_CORNER, kp_v=KP_V, use_raceline_v=True):
+                 v_corner=V_CORNER, kp_v=KP_V, use_raceline_v=True, v_max=V_MAX):
         data = np.load(raceline_npz)
         pts = data["pts"].astype(float)
         ss = data["ss"].astype(float)
@@ -74,6 +75,7 @@ class AccelPursuitPlanner:
             self._speed = _SpeedProfile(ss, theta, v_straight=v_straight, v_corner=v_corner)
         self.lookahead = lookahead_m
         self.kp_v = kp_v
+        self.v_max = v_max
         self.track_length = float(ss[-1])
 
     def plan(self, x, y, psi, v):
@@ -88,7 +90,7 @@ class AccelPursuitPlanner:
         dx, dy = lx - x, ly - y
         dist = np.maximum(np.hypot(dx, dy), 1e-3)
         alpha = ((np.arctan2(dy, dx) - psi) + np.pi) % (2 * np.pi) - np.pi
-        v_ref = self._speed(s_steps)
+        v_ref = np.minimum(self._speed(s_steps), self.v_max)
         wz = np.clip(2.0 * np.maximum(v_ref, 0.1) * np.sin(alpha) / dist + KP_HDG * alpha,
                      -WZ_MAX, WZ_MAX)
         ax = np.clip(self.kp_v * (v_ref - v_now), -AX_MAX, AX_MAX)

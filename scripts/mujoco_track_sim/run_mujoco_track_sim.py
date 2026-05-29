@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import time
 
 import mujoco
 import numpy as np
@@ -17,7 +18,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 XML = os.path.join(HERE, "assets", "go2w.xml")
 DEFAULT_RACELINE = os.path.expanduser("~/go2w_planner_ws/data/raceline_ltrack.npz")
 DEFAULT_POLICY = os.path.expanduser(
-    "~/robot_lab/logs/rsl_rl/unitree_go2w_smooth_steer/2026-05-13_16-50-51/exported/policy.pt"
+    "~/robot_lab/logs/rsl_rl/unitree_go2w_smooth_steer/2026-05-29_08-49-22/exported/policy.pt"
 )
 
 PHYS_DT = 0.005
@@ -90,8 +91,9 @@ class Sim:
         leg_q_des, wheel_dq_des = self.runner.decode(action)
         self.data.ctrl[self.act_idx] = np.concatenate([leg_q_des, wheel_dq_des])
 
-    def run(self, duration, viewer=False, verbose=True):
+    def run(self, duration, viewer=False, verbose=True, real_time=True):
         n_control = int(duration / (PHYS_DT * CONTROL_DECIMATION))
+        control_dt = PHYS_DT * CONTROL_DECIMATION
         log = {"t": [], "x": [], "y": [], "v": [], "v_ref": [], "cmd": [], "z": [], "s": []}
         command = np.zeros(3)
         last_info = {"v_ref": 0.0, "s": 0.0}
@@ -100,8 +102,15 @@ class Sim:
         if viewer:
             from mujoco import viewer as mj_viewer
             vh = mj_viewer.launch_passive(self.model, self.data)
+            base_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "base")
+            if base_id >= 0:
+                vh.cam.trackbodyid = base_id
+                vh.cam.distance = 4.0
+                vh.cam.azimuth = 90.0
+                vh.cam.elevation = -25.0
 
         self.reset_on_track()
+        wall_start = time.perf_counter()
         try:
             for k in range(n_control):
                 x, y, psi, v = self.read_planner_state()
@@ -123,6 +132,10 @@ class Sim:
 
                 if vh is not None:
                     vh.sync()
+                if real_time and vh is not None:
+                    lag = (k + 1) * control_dt - (time.perf_counter() - wall_start)
+                    if lag > 0:
+                        time.sleep(lag)
                 if verbose and k % 50 == 0:
                     print(f"t={t:5.1f}s  s={last_info['s']:5.2f}/{self.planner.track_length:.1f}m  "
                           f"pos=({x:5.2f},{y:5.2f})  v={v:4.2f}->{last_info['v_ref']:4.2f}  "
@@ -180,11 +193,12 @@ def main():
     ap.add_argument("--policy", default=DEFAULT_POLICY)
     ap.add_argument("--duration", type=float, default=30.0)
     ap.add_argument("--viewer", action="store_true")
+    ap.add_argument("--no_real_time", action="store_true")
     ap.add_argument("--plot", default=os.path.join(HERE, "track_result.png"))
     args = ap.parse_args()
 
     sim = Sim(args.xml, args.raceline, args.policy)
-    log = sim.run(args.duration, viewer=args.viewer)
+    log = sim.run(args.duration, viewer=args.viewer, real_time=not args.no_real_time)
     sim.report(log, args.plot)
 
 
