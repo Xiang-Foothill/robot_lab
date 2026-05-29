@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+import warp as wp
 
 from isaaclab.assets import Articulation
 from isaaclab.managers import SceneEntityCfg
@@ -47,7 +48,7 @@ def _ensure_observation_delay_buffers(env: ManagerBasedEnv):
         buffer_size = 1
 
     asset: Articulation = env.scene["robot"]
-    joint_dim = asset.data.joint_pos.shape[1]
+    joint_dim = wp.to_torch(asset.data.joint_pos).shape[1]
 
     expected_shapes = {
         OBS_DELAY_JOINT_POS_KEY: (env.num_envs, buffer_size, joint_dim),
@@ -99,9 +100,9 @@ def record_observation_delay_sample(env: ManagerBasedEnv, force: bool = False):
         env._obs_delay_last_policy_step = policy_step
 
     asset: Articulation = env.scene["robot"]
-    joint_pos_rel = asset.data.joint_pos - asset.data.default_joint_pos
-    joint_vel = asset.data.joint_vel
-    base_ang_vel = asset.data.root_ang_vel_b
+    joint_pos_rel = wp.to_torch(asset.data.joint_pos) - wp.to_torch(asset.data.default_joint_pos)
+    joint_vel = wp.to_torch(asset.data.joint_vel)
+    base_ang_vel = wp.to_torch(asset.data.root_ang_vel_b)
 
     env._obs_delay_head = (env._obs_delay_head + 1) % env._obs_delay_buffer_size
     head = env._obs_delay_head
@@ -116,11 +117,11 @@ def _get_delayed_from_buffer(env: ManagerBasedEnv, key: str) -> torch.Tensor:
     if not env._obs_delay_enabled:
         asset: Articulation = env.scene["robot"]
         if key == OBS_DELAY_JOINT_POS_KEY:
-            return asset.data.joint_pos - asset.data.default_joint_pos
+            return wp.to_torch(asset.data.joint_pos) - wp.to_torch(asset.data.default_joint_pos)
         if key == OBS_DELAY_JOINT_VEL_KEY:
-            return asset.data.joint_vel
+            return wp.to_torch(asset.data.joint_vel)
         if key == OBS_DELAY_BASE_ANG_VEL_KEY:
-            return asset.data.root_ang_vel_b
+            return wp.to_torch(asset.data.root_ang_vel_b)
         raise RuntimeError(f"Unknown observation delay key: {key}")
 
     record_observation_delay_sample(env, force=False)
@@ -140,7 +141,7 @@ def joint_pos_rel_without_wheel(
     """The joint positions of the asset w.r.t. the default joint positions.(Without the wheel joints)"""
     # extract the used quantities (to enable type-hinting)
     asset: Articulation = env.scene[asset_cfg.name]
-    joint_pos_rel = asset.data.joint_pos[:, asset_cfg.joint_ids] - asset.data.default_joint_pos[:, asset_cfg.joint_ids]
+    joint_pos_rel = wp.to_torch(asset.data.joint_pos)[:, asset_cfg.joint_ids] - wp.to_torch(asset.data.default_joint_pos)[:, asset_cfg.joint_ids]
     joint_pos_rel[:, wheel_asset_cfg.joint_ids] = 0
     return joint_pos_rel
 

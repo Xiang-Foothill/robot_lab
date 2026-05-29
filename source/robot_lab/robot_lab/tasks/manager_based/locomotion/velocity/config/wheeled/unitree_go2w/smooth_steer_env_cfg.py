@@ -42,8 +42,8 @@ class UnitreeGo2WSmoothSteerEnvCfg(UnitreeGo2WFlatEnvCfg):
             params={"command_name": "base_velocity", "std": 0.3},
         ))
 
-        # yaw rate tracking unchanged — track_ang_vel_z_exp reads cmd index 2 = wz
-        # weight stays at 1.5 from rough_env_cfg
+        self.rewards.track_ang_vel_z_exp.weight = 4.0
+        self.rewards.track_ang_vel_z_exp.params["std"] = 0.5
 
         # level body (roll + pitch angle)
         self.rewards.flat_orientation_l2.weight = -5.0
@@ -58,10 +58,7 @@ class UnitreeGo2WSmoothSteerEnvCfg(UnitreeGo2WFlatEnvCfg):
         self.rewards.joint_vel_l2.weight = -0.05
 
         # all 4 hips equal, all 4 thighs equal, all 4 calves equal
-        self.rewards.action_sync.weight = -2.0
-
-        # penalize wheel spinning when foot is in the air
-        self.rewards.wheel_vel_penalty.weight = -0.5
+        self.rewards.action_sync.weight = -1.0
 
         # roll/pitch rate (complements track_roll_rate_exp — also catches pitch)
         self.rewards.ang_vel_xy_l2.weight = -0.3
@@ -70,10 +67,15 @@ class UnitreeGo2WSmoothSteerEnvCfg(UnitreeGo2WFlatEnvCfg):
         self.rewards.joint_acc_wheel_l2.weight = -5e-8
 
         # wheel torque magnitude
-        self.rewards.joint_torques_wheel_l2.weight = -1e-3
+        self.rewards.joint_torques_wheel_l2.weight = -5e-4
 
         # action smoothness
         self.rewards.action_rate_l2.weight = -0.05
+
+        self.scene.terrain.physics_material.static_friction = 1.1
+        self.scene.terrain.physics_material.dynamic_friction = 1.1
+        self.events.randomize_rigid_body_material.params["static_friction_range"] = (0.8, 1.2)
+        self.events.randomize_rigid_body_material.params["dynamic_friction_range"] = (0.7, 1.1)
 
         if self.__class__.__name__ == "UnitreeGo2WSmoothSteerEnvCfg":
             self.disable_zero_weight_rewards()

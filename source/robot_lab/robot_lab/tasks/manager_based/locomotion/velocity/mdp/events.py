@@ -6,6 +6,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Literal
 
 import torch
+import warp as wp
 
 import isaaclab.utils.math as math_utils
 from isaaclab.assets import Articulation, RigidObject
@@ -100,7 +101,7 @@ def randomize_rigid_body_inertia(
     inertias = asset.root_physx_view.get_inertias()
 
     # apply randomization on default values
-    inertias[env_ids[:, None], body_ids, :] = asset.data.default_inertia[env_ids[:, None], body_ids, :].clone()
+    inertias[env_ids[:, None], body_ids, :] = wp.to_torch(asset.data.default_inertia)[env_ids[:, None], body_ids, :].clone()
 
     # randomize each diagonal element (xx, yy, zz -> indices 0, 4, 8)
     for idx in [0, 4, 8]:
@@ -282,7 +283,7 @@ def reset_root_state_uniform(
 
     # Reset pit environments to default state (no random perturbations)
     if len(pit_env_ids) > 0:
-        root_states = asset.data.default_root_state[pit_env_ids].clone()
+        root_states = wp.to_torch(asset.data.default_root_state)[pit_env_ids].clone()
         positions = root_states[:, 0:3] + env.scene.env_origins[pit_env_ids]
         orientations = root_states[:, 3:7]
         velocities = torch.zeros_like(root_states[:, 7:13])
@@ -291,7 +292,7 @@ def reset_root_state_uniform(
 
     # Reset non-pit environments with random perturbations
     if len(non_pit_env_ids) > 0:
-        root_states = asset.data.default_root_state[non_pit_env_ids].clone()
+        root_states = wp.to_torch(asset.data.default_root_state)[non_pit_env_ids].clone()
 
         # poses
         range_list = [pose_range.get(key, (0.0, 0.0)) for key in ["x", "y", "z", "roll", "pitch", "yaw"]]

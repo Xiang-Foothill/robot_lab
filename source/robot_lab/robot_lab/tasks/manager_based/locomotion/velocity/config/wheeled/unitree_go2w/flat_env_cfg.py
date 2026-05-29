@@ -24,8 +24,15 @@ class UnitreeGo2WFlatEnvCfg(UnitreeGo2WRoughEnvCfg):
         self.scene.terrain.terrain_generator = None
         # no height scan
         self.scene.height_scanner = None
+        self.scene.height_scanner_base = None
         self.observations.policy.height_scan = None
         self.observations.critic.height_scan = None
+        # no contact sensor needed for flat/wheeled locomotion
+        self.scene.contact_forces = None
+        self.rewards.wheel_vel_penalty.weight = 0.0
+        self.rewards.undesired_contacts.weight = 0.0
+        self.rewards.contact_forces.weight = 0.0
+        self.rewards.feet_contact_without_cmd.weight = 0.0
         
         #No body-frame velocity observation
         self.observations.policy.base_lin_vel = None
