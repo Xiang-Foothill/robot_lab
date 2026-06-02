@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import sys
 import time
 
 import mujoco
@@ -14,11 +15,16 @@ import numpy as np
 from accel_pursuit_planner import AccelPursuitPlanner
 from policy_runner import DEFAULT_Q, JOINT_ORDER, PolicyRunner
 
+_PLANNER_NODES = os.path.expanduser(
+    "~/go2w_planner_ws/src/planner_nodes/planner_nodes")
+if _PLANNER_NODES not in sys.path:
+    sys.path.insert(0, _PLANNER_NODES)
+
 HERE = os.path.dirname(os.path.abspath(__file__))
 XML = os.path.join(HERE, "assets", "go2w.xml")
 DEFAULT_RACELINE = os.path.expanduser("~/go2w_planner_ws/data/raceline_ltrack.npz")
 DEFAULT_POLICY = os.path.expanduser(
-    "~/robot_lab/logs/rsl_rl/unitree_go2w_smooth_steer/2026-05-29_08-49-22/exported/policy.pt"
+    "~/Repositories/robot_lab/rsl_rl/unitree_go2w_smooth_steer/2026-05-29_08-49-22/exported/policy.pt"
 )
 
 PHYS_DT = 0.005
@@ -36,10 +42,14 @@ def yaw_to_quat(yaw):
 
 
 class Sim:
-    def __init__(self, xml, raceline, policy_path):
+    def __init__(self, xml, raceline, policy_path, planner="pursuit", v_max=1.5):
         self.model = mujoco.MjModel.from_xml_path(xml)
         self.data = mujoco.MjData(self.model)
-        self.planner = AccelPursuitPlanner(raceline)
+        if planner == "mpc":
+            from fw_mpc_core import BicycleMPCAdapter
+            self.planner = BicycleMPCAdapter(raceline, v_max=v_max)
+        else:
+            self.planner = AccelPursuitPlanner(raceline)
         self.runner = PolicyRunner(policy_path)
 
         self.qpos_adr = np.array([
@@ -60,6 +70,8 @@ class Sim:
         d = np.load(raceline)
         self.race_pts = d["pts"].astype(float)
         self.race_theta = d["theta"].astype(float)
+        self.bound_inner = d["bound_inner"].astype(float) if "bound_inner" in d.files else None
+        self.bound_outer = d["bound_outer"].astype(float) if "bound_outer" in d.files else None
 
     def _sensor(self, name):
         adr, dim = self.sens[name]
@@ -168,7 +180,10 @@ class Sim:
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
             fig, ax = plt.subplots(1, 3, figsize=(16, 5))
-            ax[0].plot(self.race_pts[:, 0], self.race_pts[:, 1], "k--", lw=1, label="raceline")
+            if self.bound_inner is not None:
+                ax[0].plot(self.bound_inner[:, 0], self.bound_inner[:, 1], "k", lw=1)
+                ax[0].plot(self.bound_outer[:, 0], self.bound_outer[:, 1], "k", lw=1, label="track")
+            ax[0].plot(self.race_pts[:, 0], self.race_pts[:, 1], "g--", lw=1, label="raceline")
             ax[0].plot(log["x"], log["y"], "b-", lw=1.5, label="robot")
             ax[0].plot(log["x"][0], log["y"][0], "go", label="start")
             ax[0].axis("equal"); ax[0].legend(); ax[0].set_title("Trajectory")
@@ -192,12 +207,15 @@ def main():
     ap.add_argument("--raceline", default=DEFAULT_RACELINE)
     ap.add_argument("--policy", default=DEFAULT_POLICY)
     ap.add_argument("--duration", type=float, default=30.0)
+    ap.add_argument("--planner", choices=["pursuit", "mpc"], default="pursuit")
+    ap.add_argument("--v_max", type=float, default=1.5)
     ap.add_argument("--viewer", action="store_true")
     ap.add_argument("--no_real_time", action="store_true")
     ap.add_argument("--plot", default=os.path.join(HERE, "track_result.png"))
     args = ap.parse_args()
 
-    sim = Sim(args.xml, args.raceline, args.policy)
+    sim = Sim(args.xml, args.raceline, args.policy,
+              planner=args.planner, v_max=args.v_max)
     log = sim.run(args.duration, viewer=args.viewer, real_time=not args.no_real_time)
     sim.report(log, args.plot)
 
