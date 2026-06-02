@@ -19,6 +19,8 @@ BLEND_MARGIN = 0.9
 WZ_MAX = np.pi / 3
 V_MAX = 1.5
 V_MIN = 0.1
+CORNER_WZ_FRAC = 0.7
+BRAKE_LOOKAHEAD_M = 0.9
 
 
 class _SpeedProfile:
@@ -75,6 +77,17 @@ class AccelPursuitPlanner:
         self.lookahead = lookahead_m
         self.v_max = v_max
         self.track_length = float(ss[-1])
+        self._ss = ss
+        self._N = len(ss)
+        kappa = np.abs(np.gradient(np.unwrap(theta)) / (np.gradient(ss) + 1e-9))
+        v_curve = CORNER_WZ_FRAC * WZ_MAX / (kappa + 1e-9)
+        n_pre = max(1, int(BRAKE_LOOKAHEAD_M / (self.track_length / self._N)))
+        v_curve = minimum_filter1d(np.tile(v_curve, 3), size=2 * n_pre + 1)[self._N:2 * self._N]
+        self._v_curve = np.clip(v_curve, V_MIN, v_max)
+
+    def _curve_speed(self, s):
+        idx = np.searchsorted(self._ss, np.asarray(s) % self.track_length) % self._N
+        return self._v_curve[idx]
 
     def plan(self, x, y, psi, v):
         seq, info = self.plan_horizon(x, y, psi, v)
@@ -89,6 +102,7 @@ class AccelPursuitPlanner:
         dist = np.maximum(np.hypot(dx, dy), 1e-3)
         alpha = ((np.arctan2(dy, dx) - psi) + np.pi) % (2 * np.pi) - np.pi
         v_ref = np.minimum(self._speed(s_steps), self.v_max)
+        v_ref = np.minimum(v_ref, self._curve_speed(s_steps))
         wz = np.clip(2.0 * np.maximum(v_ref, 0.1) * np.sin(alpha) / dist + KP_HDG * alpha,
                      -WZ_MAX, WZ_MAX)
         vx = np.clip(v_ref, V_MIN, self.v_max)

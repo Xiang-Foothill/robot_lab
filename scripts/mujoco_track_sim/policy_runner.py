@@ -1,6 +1,6 @@
 # Copyright (c) 2024-2026 Ziqi Fan
 # SPDX-License-Identifier: Apache-2.0
-"""Deploy-side adapter for the Go2W smooth-steer policy (54-d obs -> 16-d action)."""
+"""Deploy-side adapter for the Go2W smooth-steer policy (57-d obs -> 16-d action)."""
 
 from __future__ import annotations
 
@@ -19,6 +19,7 @@ JOINT_ORDER = LEG_JOINTS + WHEEL_JOINTS
 DEFAULT_Q = np.array([0.0, 0.8, -1.5] * 4 + [0.0, 0.0, 0.0, 0.0], dtype=np.float64)
 LEG_SCALE = np.array([0.125 if "hip" in j else 0.25 for j in LEG_JOINTS], dtype=np.float64)
 WHEEL_VEL_SCALE = 5.0
+LIN_VEL_SCALE = 1.0
 ANG_VEL_SCALE = 0.25
 JOINT_POS_SCALE = 1.0
 JOINT_VEL_SCALE = 0.05
@@ -34,10 +35,11 @@ class PolicyRunner:
     def reset(self):
         self.last_action[:] = 0.0
 
-    def build_obs(self, base_ang_vel, command, joint_pos, joint_vel):
+    def build_obs(self, base_lin_vel, base_ang_vel, command, joint_pos, joint_vel):
         joint_pos_rel = np.asarray(joint_pos, dtype=np.float64) - DEFAULT_Q
         joint_pos_rel[self.n_legs:] = 0.0
         obs = np.concatenate([
+            np.asarray(base_lin_vel, dtype=np.float64) * LIN_VEL_SCALE,
             np.asarray(base_ang_vel, dtype=np.float64) * ANG_VEL_SCALE,
             np.asarray(command, dtype=np.float64),
             joint_pos_rel * JOINT_POS_SCALE,

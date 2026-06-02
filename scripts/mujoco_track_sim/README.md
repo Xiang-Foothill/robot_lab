@@ -29,7 +29,7 @@ cd ~/robot_lab/scripts/mujoco_track_sim
 python gen_go2w_mjcf.py                         # regenerate the MJCF (only after URDF changes)
 python run_mujoco_track_sim.py --viewer         # interactive viewer (real-time, camera follows robot)
 python run_mujoco_track_sim.py --duration 60    # headless, saves track_result.png
-python run_mujoco_track_sim.py --policy <path/to/exported/policy.pt> --viewer
+python run_mujoco_track_sim.py --policy ~/robot_lab/logs/rsl_rl/unitree_go2w_smooth_steer/2026-06-02_12-20-32/exported/policy.pt --viewer
 ```
 Useful flags: `--policy <path>`, `--duration <sec>`, `--raceline <npz>`, `--no_real_time`
 (unthrottle the viewer), `--plot <png>`.

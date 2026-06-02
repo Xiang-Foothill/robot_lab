@@ -94,10 +94,11 @@ class Sim:
         return float(pos[0]), float(pos[1]), quat_to_yaw(quat), float(vbody[0])
 
     def read_policy_state(self):
+        lin_vel = self._sensor("imu_vel")
         gyro = self._sensor("imu_gyro")
         jpos = self.data.qpos[self.qpos_adr].copy()
         jvel = self.data.qvel[self.qvel_adr].copy()
-        return gyro, jpos, jvel
+        return lin_vel, gyro, jpos, jvel
 
     def apply_action(self, action):
         leg_q_des, wheel_dq_des = self.runner.decode(action)
@@ -129,8 +130,8 @@ class Sim:
                 if k % PLAN_EVERY_N_CONTROL == 0:
                     command, last_info = self.planner.plan(x, y, psi, v)
 
-                gyro, jpos, jvel = self.read_policy_state()
-                obs = self.runner.build_obs(gyro, command, jpos, jvel)
+                lin_vel, gyro, jpos, jvel = self.read_policy_state()
+                obs = self.runner.build_obs(lin_vel, gyro, command, jpos, jvel)
                 action = self.runner.act(obs)
                 self.apply_action(action)
                 for _ in range(CONTROL_DECIMATION):
