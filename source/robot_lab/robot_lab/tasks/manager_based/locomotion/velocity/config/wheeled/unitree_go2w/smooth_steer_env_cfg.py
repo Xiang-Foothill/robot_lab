@@ -18,24 +18,22 @@ class UnitreeGo2WSmoothSteerEnvCfg(UnitreeGo2WFlatEnvCfg):
 
         self.commands.base_velocity = mdp.UniformDifferentialCommandCfg(
             resampling_time_range=(10.0, 10.0),
+            rel_standing_envs=0.15,
             ranges=mdp.UniformDifferentialCommandCfg.Ranges(
-                lin_acc_x=(-2.0, 2.0),
-                roll_rate=(0.0, 0.0),      # always command zero roll — flat chassis
+                lin_vel_x=(-2.0, 2.0),
+                roll_rate=(0.0, 0.0),
                 ang_vel_z=(-math.pi / 3, math.pi / 3),
             ),
         )
 
-        # disable old velocity tracker (no longer the goal)
         self.rewards.track_lin_vel_xy_exp.weight = 0.0
 
-        # longitudinal acceleration tracking (cmd index 0)
-        setattr(self.rewards, "track_lin_acc_x_exp", RewTerm(
-            func=mdp.track_lin_acc_x_exp,
-            weight=2.0,
-            params={"command_name": "base_velocity", "std": 1.0},
+        setattr(self.rewards, "track_lin_vel_x_exp", RewTerm(
+            func=mdp.track_lin_vel_x_exp,
+            weight=3.0,
+            params={"command_name": "base_velocity", "std": 0.25},
         ))
 
-        # roll rate tracking (cmd index 1 — always 0, so this penalizes any roll)
         setattr(self.rewards, "track_roll_rate_exp", RewTerm(
             func=mdp.track_roll_rate_exp,
             weight=1.5,

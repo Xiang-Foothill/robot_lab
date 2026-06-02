@@ -186,9 +186,9 @@ class DiscreteCommandControllerCfg(CommandTermCfg):
 
 
 class UniformDifferentialCommand(CommandTerm):
-    """Command generator for differential-drive control: [ax, roll_rate, wz].
+    """Command generator for differential-drive control: [vx, roll_rate, wz].
 
-    ax        — longitudinal acceleration (m/s²)
+    vx        — longitudinal velocity (m/s)
     roll_rate — body roll angular velocity (rad/s), typically commanded to 0
     wz        — yaw rate (rad/s)
     """
@@ -202,7 +202,7 @@ class UniformDifferentialCommand(CommandTerm):
     def __str__(self) -> str:
         return (
             f"UniformDifferentialCommand:\n"
-            f"\tax:        {self.cfg.ranges.lin_acc_x}\n"
+            f"\tvx:        {self.cfg.ranges.lin_vel_x}\n"
             f"\troll_rate: {self.cfg.ranges.roll_rate}\n"
             f"\twz:        {self.cfg.ranges.ang_vel_z}\n"
         )
@@ -214,12 +214,15 @@ class UniformDifferentialCommand(CommandTerm):
     def _resample_command(self, env_ids: Sequence[int]):
         r = self.cfg.ranges
         n = len(env_ids)
-        self._cmd[env_ids, 0] = torch.empty(n, device=self.device).uniform_(*r.lin_acc_x)
+        self._cmd[env_ids, 0] = torch.empty(n, device=self.device).uniform_(*r.lin_vel_x)
         self._cmd[env_ids, 1] = torch.empty(n, device=self.device).uniform_(*r.roll_rate)
         self._cmd[env_ids, 2] = torch.empty(n, device=self.device).uniform_(*r.ang_vel_z)
-        # zero near-zero commands to avoid degenerate gradients
         self._cmd[env_ids, 0] *= (torch.abs(self._cmd[env_ids, 0]) > 0.2).float()
         self._cmd[env_ids, 2] *= (torch.abs(self._cmd[env_ids, 2]) > 0.1).float()
+        if self.cfg.rel_standing_envs > 0.0:
+            standing = torch.rand(n, device=self.device) < self.cfg.rel_standing_envs
+            env_ids_t = torch.as_tensor(env_ids, device=self.device)
+            self._cmd[env_ids_t[standing], :] = 0.0
 
     def _update_command(self):
         pass
@@ -236,9 +239,10 @@ class UniformDifferentialCommandCfg(CommandTermCfg):
 
     @configclass
     class Ranges:
-        lin_acc_x: tuple[float, float] = (-2.0, 2.0)
+        lin_vel_x: tuple[float, float] = (-2.0, 2.0)
         roll_rate: tuple[float, float] = (0.0, 0.0)
         ang_vel_z: tuple[float, float] = (-1.0, 1.0)
 
     resampling_time_range: tuple[float, float] = (10.0, 10.0)
     ranges: Ranges = Ranges()
+    rel_standing_envs: float = 0.0

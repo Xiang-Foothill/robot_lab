@@ -688,15 +688,14 @@ def flat_orientation_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = Scen
     return reward
 
 
-def track_lin_acc_x_exp(
+def track_lin_vel_x_exp(
     env: ManagerBasedRLEnv, std: float, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
-    """Reward tracking of longitudinal acceleration command using exponential kernel."""
+    """Reward tracking of longitudinal velocity command using exponential kernel."""
     asset: RigidObject = env.scene[asset_cfg.name]
-    ax_cmd = env.command_manager.get_command(command_name)[:, 0]
-    root_lin_acc_b = quat_apply_inverse(wp.to_torch(asset.data.root_quat_w), wp.to_torch(asset.data.body_lin_acc_w)[:, 0, :])
-    ax_actual = root_lin_acc_b[:, 0]
-    error = torch.square(ax_cmd - ax_actual)
+    vx_cmd = env.command_manager.get_command(command_name)[:, 0]
+    vx_actual = wp.to_torch(asset.data.root_lin_vel_b)[:, 0]
+    error = torch.square(vx_cmd - vx_actual)
     reward = torch.exp(-error / std**2)
     reward *= torch.clamp(-wp.to_torch(env.scene["robot"].data.projected_gravity_b)[:, 2], 0, 0.7) / 0.7
     return reward
