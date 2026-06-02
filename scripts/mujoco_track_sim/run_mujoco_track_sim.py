@@ -151,7 +151,7 @@ class Sim:
                 if verbose and k % 50 == 0:
                     print(f"t={t:5.1f}s  s={last_info['s']:5.2f}/{self.planner.track_length:.1f}m  "
                           f"pos=({x:5.2f},{y:5.2f})  v={v:4.2f}->{last_info['v_ref']:4.2f}  "
-                          f"cmd[ax,roll,wz]=[{command[0]:+.2f},{command[1]:+.2f},{command[2]:+.2f}]  "
+                          f"cmd[vx,roll,wz]=[{command[0]:+.2f},{command[1]:+.2f},{command[2]:+.2f}]  "
                           f"z={self.data.qpos[2]:.3f}")
                 if self.data.qpos[2] < 0.15:
                     print(f"!! base height {self.data.qpos[2]:.3f} m - robot fell at t={t:.1f}s")
@@ -190,8 +190,8 @@ class Sim:
             ax[0].set_xlabel("x [m]"); ax[0].set_ylabel("y [m]")
             ax[1].plot(log["t"], log["v"], label="v measured")
             ax[1].plot(log["t"], log["v_ref"], "--", label="v ref")
-            ax[1].plot(log["t"], log["cmd"][:, 0], ":", label="ax cmd")
-            ax[1].legend(); ax[1].set_title("Speed / accel cmd"); ax[1].set_xlabel("t [s]")
+            ax[1].plot(log["t"], log["cmd"][:, 0], ":", label="vx cmd")
+            ax[1].legend(); ax[1].set_title("Speed / vel cmd"); ax[1].set_xlabel("t [s]")
             ax[2].plot(log["t"], dists, label="cross-track err")
             ax[2].plot(log["t"], log["cmd"][:, 2], "--", label="wz cmd")
             ax[2].legend(); ax[2].set_title("Tracking error / yaw cmd"); ax[2].set_xlabel("t [s]")

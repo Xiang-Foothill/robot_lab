@@ -1,6 +1,6 @@
 # Copyright (c) 2024-2026 Ziqi Fan
 # SPDX-License-Identifier: Apache-2.0
-"""Acceleration pure-pursuit planner emitting [lin_acc_x, roll_rate, ang_vel_z]."""
+"""Velocity pure-pursuit planner emitting [lin_vel_x, roll_rate, ang_vel_z]."""
 
 from __future__ import annotations
 
@@ -16,10 +16,9 @@ V_STRAIGHT = 2.8
 V_CORNER = 0.8
 BLEND_KAPPA = 0.5
 BLEND_MARGIN = 0.9
-KP_V = 1.5
-AX_MAX = 2.0
 WZ_MAX = np.pi / 3
 V_MAX = 1.5
+V_MIN = 0.1
 
 
 class _SpeedProfile:
@@ -61,7 +60,7 @@ class _RacelineProjector:
 
 class AccelPursuitPlanner:
     def __init__(self, raceline_npz, lookahead_m=LOOKAHEAD_M, v_straight=V_STRAIGHT,
-                 v_corner=V_CORNER, kp_v=KP_V, use_raceline_v=True, v_max=V_MAX):
+                 v_corner=V_CORNER, use_raceline_v=True, v_max=V_MAX):
         data = np.load(raceline_npz)
         pts = data["pts"].astype(float)
         ss = data["ss"].astype(float)
@@ -74,7 +73,6 @@ class AccelPursuitPlanner:
         else:
             self._speed = _SpeedProfile(ss, theta, v_straight=v_straight, v_corner=v_corner)
         self.lookahead = lookahead_m
-        self.kp_v = kp_v
         self.v_max = v_max
         self.track_length = float(ss[-1])
 
@@ -93,9 +91,9 @@ class AccelPursuitPlanner:
         v_ref = np.minimum(self._speed(s_steps), self.v_max)
         wz = np.clip(2.0 * np.maximum(v_ref, 0.1) * np.sin(alpha) / dist + KP_HDG * alpha,
                      -WZ_MAX, WZ_MAX)
-        ax = np.clip(self.kp_v * (v_ref - v_now), -AX_MAX, AX_MAX)
+        vx = np.clip(v_ref, V_MIN, self.v_max)
         roll = np.zeros(HORIZON)
-        seq = np.stack([ax, roll, wz], axis=1).astype(np.float32)
+        seq = np.stack([vx, roll, wz], axis=1).astype(np.float32)
         rx, ry, rpsi = self._proj.at_s(s_steps)
         info = {"s": s_now, "v_ref": float(v_ref[0]), "v_now": v_now,
                 "pred_x": rx, "pred_y": ry, "pred_psi": rpsi}

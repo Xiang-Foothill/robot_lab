@@ -2,7 +2,7 @@
 
 Standalone (ROS-free) MuJoCo rig to validate the Go2W smooth-steer RL policy following
 the raceline before deploying to the robot. The policy is trained in IsaacLab with the
-`[lin_acc_x, roll_rate, ang_vel_z]` differential command; this rig reproduces the exact
+`[lin_vel_x, roll_rate, ang_vel_z]` differential command; this rig reproduces the exact
 observation/action interface so a policy that works here can be ported to the robot
 `rl_node` unchanged.
 
@@ -13,10 +13,10 @@ observation/action interface so a policy that works here can be ported to the ro
   `EFFORT_LIMIT=23.5`, `BASE_INIT_HEIGHT=0.45`, `GROUND_FRICTION=1.1` (matches the lab floor).
 - `policy_runner.py` — `PolicyRunner`: the exact 54-d observation layout and 16-d action
   decode of the IsaacLab env. This is the piece to port into the robot `rl_node`.
-- `accel_pursuit_planner.py` — `AccelPursuitPlanner`: raceline + pose → `[ax, 0, wz]`.
-  Outer speed loop `ax = Kp·(v_ref − v)`, yaw from pure-pursuit geometry, roll fixed at 0.
-  Drops into a ROS node that publishes an `action_seq` of shape `(HORIZON, 3)` via
-  `plan_horizon()`.
+- `accel_pursuit_planner.py` — `AccelPursuitPlanner`: raceline + pose → `[vx, 0, wz]`.
+  Passes the raceline reference speed directly as a velocity target; yaw from pure-pursuit
+  geometry; roll fixed at 0. Drops into a ROS node that publishes an `action_seq` of shape
+  `(HORIZON, 3)` via `plan_horizon()`.
 - `run_mujoco_track_sim.py` — the test loop (50 Hz control, 10 Hz planning, 200 Hz physics).
   Defaults to the current best policy; override with `--policy`.
 - `assets/go2w.xml`, `assets/meshes/` — generated MuJoCo model (do not hand-edit; regenerate).
@@ -35,7 +35,7 @@ Useful flags: `--policy <path>`, `--duration <sec>`, `--raceline <npz>`, `--no_r
 (unthrottle the viewer), `--plot <png>`.
 
 ## Policy interface (smooth-steer)
-- obs (54): `base_ang_vel·0.25 (3)`, `command (3) = [lin_acc_x, roll_rate, ang_vel_z]`,
+- obs (54): `base_ang_vel·0.25 (3)`, `command (3) = [lin_vel_x, roll_rate, ang_vel_z]`,
   `joint_pos_rel (16, wheels zeroed)`, `joint_vel·0.05 (16)`, `last_action (16)`.
 - action (16): 12 leg position deltas (`q = default + scale·a`, scale hip 0.125 / others 0.25)
   + 4 wheel velocity targets (`dq = 5.0·a`).
@@ -43,6 +43,21 @@ Useful flags: `--policy <path>`, `--duration <sec>`, `--raceline <npz>`, `--no_r
 - actuators match IsaacLab: legs position kp=70 / damping 10, wheels velocity kv=0.5,
   torque limited to ±23.5 N·m (the effort limit used in training — do not inflate the wheel
   gain to force tracking, it overstates torque/overload).
+
+## Command space change: acceleration → velocity
+The policy was retrained (2026-06) to accept `lin_vel_x` (m/s) instead of `lin_acc_x` (m/s²)
+as command index 0. The training range is still `(-2.0, 2.0)`.
+
+**Why:** acceleration commands do not pin steady-state speed — at constant cruise the
+commanded value earns little reward and travel direction is left to the optimizer, which can
+settle in a backward-cruising basin. Velocity commands make the policy act as a closed-loop
+speed tracker: `vx=0` is an explicit hold-position instruction, and `rel_standing_envs=0.15`
+trains this explicitly. The reward kernel std was tightened from 1.0 → 0.25 for more precise
+tracking.
+
+**Planner side:** planners now pass reference velocity directly (`vx = v_ref`); the MPC
+publishes `x_opt[5, k+1]` (planned speed from the bicycle model) instead of `u_opt[0, k]`
+(ax). Internally the MPC still optimizes ax — only the extracted output changed.
 
 ## Exporting a policy to test
 `play.py` writes `<run>/exported/policy.pt` (TorchScript) on load, which this rig consumes.
@@ -55,28 +70,19 @@ python ~/robot_lab/scripts/reinforcement_learning/rsl_rl/play.py \
 ```
 
 ## Deployment mapping (robot)
-The planner publishes `action_seq (HORIZON, 3)` of `[ax, 0, wz]`; the robot `rl_node` selects
+The planner publishes `action_seq (HORIZON, 3)` of `[vx, 0, wz]`; the robot `rl_node` selects
 the horizon index by elapsed time, fills `velocity_commands`, and runs `PolicyRunner` (obs
-from IMU gyro + joint states, action → leg `q` / wheel `dq`). Same topology as the current
-velocity-tracking deployment, with the command contract changed to acceleration.
+from IMU gyro + joint states, action → leg `q` / wheel `dq`). Same topology as the previous
+deployment, with the command contract changed from acceleration to velocity.
 
 ## Context / validated findings
-- The rig is **validated against native IsaacLab**: forced-command tests match (e.g. `ax=+1.5`
-  gives the same body-frame velocity and wheel response in both sims), so MuJoCo results here
-  are trustworthy.
+- The rig is **validated against native IsaacLab**: forced-command tests match, so MuJoCo
+  results here are trustworthy.
 - **Frame convention:** body +x is visual-forward (front hips at +0.1934 m). Positive
-  `lin_acc_x` should drive forward.
-- **The acceleration command does not pin steady-state speed/direction** — at constant cruise
-  the actual accel ≈ 0, so the command earns little reward and travel direction is left to the
-  optimizer. Training from scratch can land in a backward-cruising basin (`model_29999` did:
-  backward at every command; a planner sign-flip cannot fix this, there is no forward gear).
-- **Fix without changing the command space:** fine-tune from a known forward-driving
-  checkpoint. `model_18997` (run `2026-05-29_08-49-22`, fine-tuned from `model_13998`) drives
-  forward for `ax>0`, reverses for `ax<0`, yaws ~0.6–0.9 rad/s, and laps the raceline. This is
-  the current default policy. **After any retrain, re-check the `ax`→direction mapping in
-  MuJoCo before track tests.**
-- Tracking tightness is **speed-limited, not model-limited**: with yaw capped at π/3 rad/s,
+  `lin_vel_x` drives forward.
+- **Tracking tightness is speed-limited, not model-limited**: with yaw capped at π/3 rad/s,
   turn radius ≈ v / yaw, so lowering the planner target speed tightens the line on tight tracks.
-  The planner caps the target speed at `V_MAX = 1.5` m/s (`v_max` ctor arg); on this raceline
-  that drops the mean cross-track error from ~1.2 m (uncapped ~3 m/s) to ~0.05 m. Raise it for
-  faster, wider laps.
+  The planner caps target speed at `V_MAX = 1.5` m/s; on this raceline that keeps mean
+  cross-track error ~0.05 m. Raise it for faster, wider laps.
+- **After any retrain, validate the `vx`→direction mapping in MuJoCo before track tests.**
+  Check that `vx > 0` drives forward and `vx = 0` holds position with no backward drift.
