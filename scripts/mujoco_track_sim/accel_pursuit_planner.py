@@ -89,7 +89,7 @@ class AccelPursuitPlanner:
         idx = np.searchsorted(self._ss, np.asarray(s) % self.track_length) % self._N
         return self._v_curve[idx]
 
-    def plan(self, x, y, psi, v):
+    def plan(self, x, y, psi, v, phi=0.0):
         seq, info = self.plan_horizon(x, y, psi, v)
         return seq[0], info
 
