@@ -11,78 +11,126 @@ observation/action interface so a policy that works here can be ported to the ro
   `.dae`→`.stl`, floating base, ground plane, IsaacLab-matched actuators, IMU/gyro sensor).
   Run once after a URDF change. Key constants: `LEG_KP=70`, `LEG_KD=10`, `WHEEL_KV=0.5`,
   `EFFORT_LIMIT=23.5`, `BASE_INIT_HEIGHT=0.45`, `GROUND_FRICTION=1.1` (matches the lab floor).
-- `policy_runner.py` — `PolicyRunner`: the exact 54-d observation layout and 16-d action
-  decode of the IsaacLab env. This is the piece to port into the robot `rl_node`.
-- `accel_pursuit_planner.py` — `AccelPursuitPlanner`: raceline + pose → `[vx, 0, wz]`.
-  Passes the raceline reference speed directly as a velocity target; yaw from pure-pursuit
-  geometry; roll fixed at 0. Drops into a ROS node that publishes an `action_seq` of shape
-  `(HORIZON, 3)` via `plan_horizon()`.
+- `policy_runner.py` — `PolicyRunner`: 57-d observation layout, 16-d action decode, and
+  calf lean overlay for active tilt. Ported verbatim into the robot `accel_rl_node`.
+- `accel_pursuit_planner.py` — `AccelPursuitPlanner`: raceline + pose → `[vx, roll, wz]`.
+  Pure-pursuit geometry; supports both `.npz` and `.h5` raceline files.
 - `run_mujoco_track_sim.py` — the test loop (50 Hz control, 10 Hz planning, 200 Hz physics).
-  Defaults to the current best policy; override with `--policy`.
 - `assets/go2w.xml`, `assets/meshes/` — generated MuJoCo model (do not hand-edit; regenerate).
 
 ## Run
 ```bash
-conda activate isaac
+conda activate go2w_race_py38
 cd ~/robot_lab/scripts/mujoco_track_sim
 
-python gen_go2w_mjcf.py                         # regenerate the MJCF (only after URDF changes)
-python run_mujoco_track_sim.py --viewer         # interactive viewer (real-time, camera follows robot)
-python run_mujoco_track_sim.py --duration 60    # headless, saves track_result.png
-python run_mujoco_track_sim.py --policy ~/robot_lab/logs/rsl_rl/unitree_go2w_smooth_steer/2026-06-02_12-20-32/exported/policy.pt --viewer
+python gen_go2w_mjcf.py                   # regenerate MJCF (only after URDF changes)
+python run_mujoco_track_sim.py --viewer   # interactive viewer, real-time
+python run_mujoco_track_sim.py --duration 60 --no_real_time  # headless, saves track_result.png
+
+# mpc planner (recommended)
+python run_mujoco_track_sim.py --planner mpc --viewer
+
+# active tilt comparison
+python run_mujoco_track_sim.py --planner mpc --viewer               # no tilt (control group)
+python run_mujoco_track_sim.py --planner mpc --tilt --viewer        # active tilt enabled
+
+# specify policy explicitly (required when default policy path changes)
+python run_mujoco_track_sim.py --planner mpc --tilt \
+  --policy ~/go2w_planner_ws/data/<run>/exported/policy.pt --viewer
 ```
-Useful flags: `--policy <path>`, `--duration <sec>`, `--raceline <npz>`, `--no_real_time`
-(unthrottle the viewer), `--plot <png>`.
+Useful flags: `--planner {pursuit,mpc}`, `--tilt`, `--policy <path>`, `--raceline <path>`,
+`--duration <sec>`, `--no_real_time`, `--v_max <float>`, `--plot <png>`.
+
+## Raceline
+The default raceline is:
+```
+~/Go2w_race/Go2WRace/go2w_controllers/planners/trajectory/casadi_dynamics_bicycle_trajectory_vx_3.2.h5
+```
+This is the correct lab-scale track (L ≈ 14.3 m). Both `.h5` and `.npz` files are supported.
+The old `.npz` files in `go2w_planner_ws/data/` were generated for a larger track and should
+not be used.
 
 ## Policy interface (smooth-steer)
-- obs (54): `base_ang_vel·0.25 (3)`, `command (3) = [lin_vel_x, roll_rate, ang_vel_z]`,
+- obs (57): `base_lin_vel·1.0 (3)`, `base_ang_vel·0.25 (3)`, `command (3) = [lin_vel_x, roll_rate, ang_vel_z]`,
   `joint_pos_rel (16, wheels zeroed)`, `joint_vel·0.05 (16)`, `last_action (16)`.
 - action (16): 12 leg position deltas (`q = default + scale·a`, scale hip 0.125 / others 0.25)
   + 4 wheel velocity targets (`dq = 5.0·a`).
-- joint order `FR,FL,RR,RL` legs then `FR,FL,RR,RL` wheels; command index 2 = yaw rate.
+- joint order `FR,FL,RR,RL` legs then `FR,FL,RR,RL` wheels.
 - actuators match IsaacLab: legs position kp=70 / damping 10, wheels velocity kv=0.5,
-  torque limited to ±23.5 N·m (the effort limit used in training — do not inflate the wheel
-  gain to force tracking, it overstates torque/overload).
+  torque limited to ±23.5 N·m (do not inflate — overstates torque/overcurrent).
 
-## Command space change: acceleration → velocity
-The policy was retrained (2026-06) to accept `lin_vel_x` (m/s) instead of `lin_acc_x` (m/s²)
-as command index 0. The training range is still `(-2.0, 2.0)`.
+## Active tilt
+The `--tilt` flag enables a model-based calf lean overlay that physically banks the body
+into corners without requiring a retrained policy.
 
-**Why:** acceleration commands do not pin steady-state speed — at constant cruise the
-commanded value earns little reward and travel direction is left to the optimizer, which can
-settle in a backward-cruising basin. Velocity commands make the policy act as a closed-loop
-speed tracker: `vx=0` is an explicit hold-position instruction, and `rel_standing_envs=0.15`
-trains this explicitly. The reward kernel std was tightened from 1.0 → 0.25 for more precise
-tracking.
+**Mechanism:** hip abduction (the "shoulder" joint) only shifts wheel stance width — it
+produces zero body roll against 4 grounded contact points. The only joint that changes leg
+height is the calf (knee). Asymmetric calf flexion (right calves flex more → right side
+shortens → body leans left) produces ~1:1 rad body roll per rad calf offset, calibrated
+in simulation.
 
-**Planner side:** planners now pass reference velocity directly (`vx = v_ref`); the MPC
-publishes `x_opt[5, k+1]` (planned speed from the bicycle model) instead of `u_opt[0, k]`
-(ax). Internally the MPC still optimizes ax — only the extracted output changed.
+**Implementation:** `PolicyRunner._lean_default(lean_angle)` shifts the calf joint default
+that `joint_pos_rel` is computed against, so the policy sees the lean pose as neutral and
+does not fight the overlay. The bank angle target is the LTR=0 condition from
+`unitree_racing`: `θ_des = -atan(v·ψ̇/g)`. The MPC planner passes this through `theta_des`
+in the plan info dict; the sim loop applies it to both obs and action decode.
+
+**Results (flat policy, 40 s, 3 laps):**
+
+| | no tilt | tilt |
+|---|---|---|
+| cross-track error | 0.062 m mean, 0.135 m max | 0.065 m mean, 0.166 m max |
+| speed | 1.08 m/s mean | 1.06 m/s mean |
+| body roll delivered | 1° | 9° (vs 14° target, 64% delivery) |
+
+Partial delivery (64%) is due to the flat policy's symmetric PD control partially resisting
+the calf offset. Tracking is preserved. The gain `K_CALF_LEAN` in `policy_runner.py` can
+be increased (try 1.3–1.5) to push delivered roll closer to target.
+
+**Robot deployment:** set `-p tilt_enable:=true` on both `fw_mpc_node` (workstation) and
+`accel_rl_node` (robot). Both default to off for clean tilt-vs-no-tilt comparisons.
 
 ## Exporting a policy to test
 `play.py` writes `<run>/exported/policy.pt` (TorchScript) on load, which this rig consumes.
-Always pin the run with `--load_run` — a stray `unitree_go2w_smooth_steer/unitree_go2w_flat/`
-folder sorts after the date dirs and gets auto-selected otherwise:
+Pin the run with `--load_run` — a stray `unitree_go2w_flat/` folder sorts after the date
+dirs and gets auto-selected otherwise:
 ```bash
 python ~/robot_lab/scripts/reinforcement_learning/rsl_rl/play.py \
   --task RobotLab-Isaac-Velocity-SmoothSteer-Unitree-Go2W-v0 \
   --headless --num_envs 1 --load_run <YYYY-MM-DD_HH-MM-SS>
 ```
 
-## Deployment mapping (robot)
-The planner publishes `action_seq (HORIZON, 3)` of `[vx, 0, wz]`; the robot `rl_node` selects
-the horizon index by elapsed time, fills `velocity_commands`, and runs `PolicyRunner` (obs
-from IMU gyro + joint states, action → leg `q` / wheel `dq`). Same topology as the previous
-deployment, with the command contract changed from acceleration to velocity.
+## Tilt policy training
+A separate task `RobotLab-Isaac-Velocity-Tilt-Unitree-Go2W-v0` is registered for training
+a policy that actively responds to roll_rate commands. The no-tilt smooth-steer task is
+kept frozen as the control group. Train with:
+```bash
+python scripts/reinforcement_learning/rsl_rl/train.py \
+  --task RobotLab-Isaac-Velocity-Tilt-Unitree-Go2W-v0 \
+  --resume --load_run <smooth-steer-run-date> \
+  --max_iterations 2000 --headless
+```
+Key cfg changes in `tilt_env_cfg.py` vs smooth-steer: `roll_rate` range opened to ±1.5 rad/s;
+`flat_orientation_l2` replaced by pitch-only penalty (roll free); `action_sync` hip groups
+split into left/right pairs so the calf mechanism can deliver lean while thighs/wheels stay
+symmetric (preserving rigid chassis style).
 
-## Context / validated findings
-- The rig is **validated against native IsaacLab**: forced-command tests match, so MuJoCo
-  results here are trustworthy.
-- **Frame convention:** body +x is visual-forward (front hips at +0.1934 m). Positive
-  `lin_vel_x` drives forward.
-- **Tracking tightness is speed-limited, not model-limited**: with yaw capped at π/3 rad/s,
-  turn radius ≈ v / yaw, so lowering the planner target speed tightens the line on tight tracks.
-  The planner caps target speed at `V_MAX = 1.5` m/s; on this raceline that keeps mean
-  cross-track error ~0.05 m. Raise it for faster, wider laps.
-- **After any retrain, validate the `vx`→direction mapping in MuJoCo before track tests.**
-  Check that `vx > 0` drives forward and `vx = 0` holds position with no backward drift.
+## Deployment mapping (robot)
+The planner publishes `action_seq (HORIZON, 3)` of `[vx, roll_rate, wz]` at 10 Hz. The robot
+`accel_rl_node` selects the horizon step by elapsed time and runs `PolicyRunner` at 50 Hz
+(obs from IMU gyro + OptiTrack est_state + joint states, action → leg `q` / wheel `dq` at
+500 Hz). When `tilt_enable=true`, both nodes independently apply the LTR=0 bank angle:
+the workstation fills `roll_rate` in the action sequence; the robot computes `lean_angle`
+from measured v and ψ̇ and applies the calf overlay in `accel_rl_node`.
+
+## Validated findings
+- **Raceline size matters:** the h5 default is the correct lab-scale track. The old npz
+  files were built for a larger track — the robot will go off course if those are used.
+- **Hip abduction cannot produce body roll** on a 4-wheeled grounded robot. Calf asymmetry
+  is the correct lean mechanism (verified by forced-joint tests in MuJoCo).
+- **RL tilt training is harder than expected:** the flat policy's strong joint-pos-penalty
+  and 4-way action_sync prevent calf asymmetry even after 4000 fine-tune iterations. The
+  direct calf overlay achieves comparable lean without retraining.
+- **Frame convention:** body +x is visual-forward. Positive `lin_vel_x` drives forward.
+- **After any retrain**, validate `vx > 0` drives forward and `vx = 0` holds position
+  with no backward drift before track tests.

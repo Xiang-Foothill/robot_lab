@@ -1,0 +1,126 @@
+--- git commit ---
+1d7f13e4595b50e01c61fcf9174018c557169c4f
+
+
+--- git status ---
+On branch marla
+Your branch is up to date with 'origin/marla'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   scripts/mujoco_track_sim/assets/go2w.xml
+	modified:   scripts/mujoco_track_sim/gen_go2w_mjcf.py
+	modified:   scripts/mujoco_track_sim/run_mujoco_track_sim.py
+	modified:   scripts/mujoco_track_sim/track_result.png
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	scripts/mujoco_track_sim/_convention_check.py
+
+no changes added to commit (use "git add" and/or "git commit -a") 
+
+
+--- git diff ---
+diff --git a/scripts/mujoco_track_sim/assets/go2w.xml b/scripts/mujoco_track_sim/assets/go2w.xml
+index 65cbc76..e79d990 100644
+--- a/scripts/mujoco_track_sim/assets/go2w.xml
++++ b/scripts/mujoco_track_sim/assets/go2w.xml
+@@ -3,7 +3,7 @@
+   <option timestep="0.005" integrator="implicitfast" />
+   <default>
+     <default class="collision">
+-      <geom group="3" contype="1" conaffinity="1" condim="3" friction="0.7 0.005 0.0001" rgba="0.5 0.6 0.7 0.4" />
++      <geom group="3" contype="1" conaffinity="1" condim="3" friction="1.1 0.005 0.0001" rgba="0.5 0.6 0.7 0.4" />
+     </default>
+     <default class="visual">
+       <geom group="2" contype="0" conaffinity="0" density="0" />
+@@ -24,7 +24,7 @@
+   </asset>
+   <worldbody>
+     <light pos="0 0 4" dir="0 0 -1" directional="true" />
+-    <geom name="floor" type="plane" size="0 0 0.05" material="grid" condim="3" friction="0.7 0.005 0.0001" />
++    <geom name="floor" type="plane" size="0 0 0.05" material="grid" condim="3" friction="1.1 0.005 0.0001" />
+     <body name="base" pos="0 0 0.45">
+       <freejoint name="root" />
+       <inertial pos="0.021112 0 -0.005366" mass="6.921" fullinertia="0.02448 0.098077 0.107 0.00012166 0.0014849 -3.12e-05" />
+diff --git a/scripts/mujoco_track_sim/gen_go2w_mjcf.py b/scripts/mujoco_track_sim/gen_go2w_mjcf.py
+index b5142f8..31d90f4 100644
+--- a/scripts/mujoco_track_sim/gen_go2w_mjcf.py
++++ b/scripts/mujoco_track_sim/gen_go2w_mjcf.py
+@@ -34,7 +34,7 @@ LEG_KD = 10.0
+ WHEEL_KV = 0.5
+ EFFORT_LIMIT = 23.5
+ BASE_INIT_HEIGHT = 0.45
+-GROUND_FRICTION = 0.7
++GROUND_FRICTION = 1.1
+ 
+ 
+ def rpy_to_quat(rpy):
+diff --git a/scripts/mujoco_track_sim/run_mujoco_track_sim.py b/scripts/mujoco_track_sim/run_mujoco_track_sim.py
+index 17f3d09..9d03cf1 100644
+--- a/scripts/mujoco_track_sim/run_mujoco_track_sim.py
++++ b/scripts/mujoco_track_sim/run_mujoco_track_sim.py
+@@ -6,6 +6,7 @@ from __future__ import annotations
+ 
+ import argparse
+ import os
++import time
+ 
+ import mujoco
+ import numpy as np
+@@ -90,8 +91,9 @@ class Sim:
+         leg_q_des, wheel_dq_des = self.runner.decode(action)
+         self.data.ctrl[self.act_idx] = np.concatenate([leg_q_des, wheel_dq_des])
+ 
+-    def run(self, duration, viewer=False, verbose=True):
++    def run(self, duration, viewer=False, verbose=True, real_time=True):
+         n_control = int(duration / (PHYS_DT * CONTROL_DECIMATION))
++        control_dt = PHYS_DT * CONTROL_DECIMATION
+         log = {"t": [], "x": [], "y": [], "v": [], "v_ref": [], "cmd": [], "z": [], "s": []}
+         command = np.zeros(3)
+         last_info = {"v_ref": 0.0, "s": 0.0}
+@@ -100,8 +102,15 @@ class Sim:
+         if viewer:
+             from mujoco import viewer as mj_viewer
+             vh = mj_viewer.launch_passive(self.model, self.data)
++            base_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "base")
++            if base_id >= 0:
++                vh.cam.trackbodyid = base_id
++                vh.cam.distance = 4.0
++                vh.cam.azimuth = 90.0
++                vh.cam.elevation = -25.0
+ 
+         self.reset_on_track()
++        wall_start = time.perf_counter()
+         try:
+             for k in range(n_control):
+                 x, y, psi, v = self.read_planner_state()
+@@ -123,6 +132,10 @@ class Sim:
+ 
+                 if vh is not None:
+                     vh.sync()
++                if real_time and vh is not None:
++                    lag = (k + 1) * control_dt - (time.perf_counter() - wall_start)
++                    if lag > 0:
++                        time.sleep(lag)
+                 if verbose and k % 50 == 0:
+                     print(f"t={t:5.1f}s  s={last_info['s']:5.2f}/{self.planner.track_length:.1f}m  "
+                           f"pos=({x:5.2f},{y:5.2f})  v={v:4.2f}->{last_info['v_ref']:4.2f}  "
+@@ -180,11 +193,12 @@ def main():
+     ap.add_argument("--policy", default=DEFAULT_POLICY)
+     ap.add_argument("--duration", type=float, default=30.0)
+     ap.add_argument("--viewer", action="store_true")
++    ap.add_argument("--no_real_time", action="store_true")
+     ap.add_argument("--plot", default=os.path.join(HERE, "track_result.png"))
+     args = ap.parse_args()
+ 
+     sim = Sim(args.xml, args.raceline, args.policy)
+-    log = sim.run(args.duration, viewer=args.viewer)
++    log = sim.run(args.duration, viewer=args.viewer, real_time=not args.no_real_time)
+     sim.report(log, args.plot)
+ 
+ 
+diff --git a/scripts/mujoco_track_sim/track_result.png b/scripts/mujoco_track_sim/track_result.png
+index 0750df6..25f0c59 100644
+Binary files a/scripts/mujoco_track_sim/track_result.png and b/scripts/mujoco_track_sim/track_result.png differ

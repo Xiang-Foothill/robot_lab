@@ -27,7 +27,7 @@ DEFAULT_RACELINE = os.path.expanduser(
     "~/Go2w_race/Go2WRace/go2w_controllers/planners/trajectory/"
     "casadi_dynamics_bicycle_trajectory_vx_3.2.h5")
 DEFAULT_POLICY = os.path.expanduser(
-    "~/Repositories/robot_lab/rsl_rl/unitree_go2w_smooth_steer/2026-05-29_08-49-22/exported/policy.pt"
+    "~/go2w_planner_ws/data/2026-06-02_12-20-32(2)/2026-06-02_12-20-32/exported/policy.pt"
 )
 
 PHYS_DT = 0.005
@@ -119,8 +119,8 @@ class Sim:
         jvel = self.data.qvel[self.qvel_adr].copy()
         return lin_vel, gyro, jpos, jvel
 
-    def apply_action(self, action):
-        leg_q_des, wheel_dq_des = self.runner.decode(action)
+    def apply_action(self, action, lean_angle=0.0):
+        leg_q_des, wheel_dq_des = self.runner.decode(action, lean_angle)
         self.data.ctrl[self.act_idx] = np.concatenate([leg_q_des, wheel_dq_des])
 
     def run(self, duration, viewer=False, verbose=True, real_time=True):
@@ -150,10 +150,13 @@ class Sim:
                 if k % PLAN_EVERY_N_CONTROL == 0:
                     command, last_info = self.planner.plan(x, y, psi, v, roll)
 
+                # only apply calf lean overlay when tilt is enabled on the planner
+                tilt_on = getattr(self.planner, 'tilt_enable', False)
+                lean_angle = last_info.get("theta_des", 0.0) if tilt_on else 0.0
                 lin_vel, gyro, jpos, jvel = self.read_policy_state()
-                obs = self.runner.build_obs(lin_vel, gyro, command, jpos, jvel)
+                obs = self.runner.build_obs(lin_vel, gyro, command, jpos, jvel, lean_angle)
                 action = self.runner.act(obs)
-                self.apply_action(action)
+                self.apply_action(action, lean_angle)
                 for _ in range(CONTROL_DECIMATION):
                     mujoco.mj_step(self.model, self.data)
 

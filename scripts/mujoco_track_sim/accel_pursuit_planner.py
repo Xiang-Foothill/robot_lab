@@ -63,12 +63,25 @@ class _RacelineProjector:
 class AccelPursuitPlanner:
     def __init__(self, raceline_npz, lookahead_m=LOOKAHEAD_M, v_straight=V_STRAIGHT,
                  v_corner=V_CORNER, use_raceline_v=True, v_max=V_MAX):
-        data = np.load(raceline_npz)
-        pts = data["pts"].astype(float)
-        ss = data["ss"].astype(float)
-        theta = data["theta"].astype(float)
+        if raceline_npz.endswith((".h5", ".hdf5")):
+            import h5py
+            with h5py.File(raceline_npz, "r") as f:
+                x_arr = np.asarray(f["x"], dtype=float)
+                y_arr = np.asarray(f["y"], dtype=float)
+                theta = np.asarray(f["psi"], dtype=float)
+            pts = np.column_stack((x_arr, y_arr))
+            dx = np.diff(pts[:, 0], prepend=pts[0, 0])
+            dy = np.diff(pts[:, 1], prepend=pts[0, 1])
+            ss = np.cumsum(np.hypot(dx, dy))
+            data = None
+        else:
+            import numpy as _np
+            data = _np.load(raceline_npz)
+            pts = data["pts"].astype(float)
+            ss = data["ss"].astype(float)
+            theta = data["theta"].astype(float)
         self._proj = _RacelineProjector(pts, ss, theta)
-        if use_raceline_v and "v" in data.files:
+        if use_raceline_v and data is not None and "v" in data.files:
             v_arr = data["v"].astype(float)
             L, N = float(ss[-1]), len(ss)
             self._speed = lambda s: v_arr[np.searchsorted(ss, np.asarray(s) % L) % N]

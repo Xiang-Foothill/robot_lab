@@ -62,3 +62,12 @@ class UnitreeGo2WSmoothSteerPPORunnerCfg(UnitreeGo2WFlatPPORunnerCfg):
         # lower LR + tighter KL for fine-tuning from flat checkpoint
         self.algorithm.learning_rate = 1.0e-4
         self.algorithm.desired_kl = 0.005
+
+
+@configclass
+class UnitreeGo2WTiltPPORunnerCfg(UnitreeGo2WSmoothSteerPPORunnerCfg):
+    def __post_init__(self):
+        super().__post_init__()
+
+        # separate experiment dir so the tilt policy never overwrites the no-tilt control group
+        self.experiment_name = "unitree_go2w_tilt"

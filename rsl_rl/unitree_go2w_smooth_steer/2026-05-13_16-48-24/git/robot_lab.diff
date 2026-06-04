@@ -1,0 +1,94 @@
+--- git commit ---
+67c844d4cdb80755eb6345e5fdb48f71b6dbe537
+
+
+--- git status ---
+On branch marla
+Your branch is up to date with 'origin/marla'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   scripts/reinforcement_learning/rsl_rl/train.py
+	modified:   source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/wheeled/unitree_go2w/agents/rsl_rl_ppo_cfg.py
+	modified:   source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/wheeled/unitree_go2w/smooth_steer_env_cfg.py
+
+no changes added to commit (use "git add" and/or "git commit -a") 
+
+
+--- git diff ---
+diff --git a/scripts/reinforcement_learning/rsl_rl/train.py b/scripts/reinforcement_learning/rsl_rl/train.py
+index 20c50a1..66cf9e0 100644
+--- a/scripts/reinforcement_learning/rsl_rl/train.py
++++ b/scripts/reinforcement_learning/rsl_rl/train.py
+@@ -97,7 +97,7 @@ from isaaclab.envs import (
+ from isaaclab.utils.dict import print_dict
+ from isaaclab.utils.io import dump_yaml
+ 
+-from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper
++from isaaclab_rl.rsl_rl import RslRlBaseRunnerCfg, RslRlVecEnvWrapper, handle_deprecated_rsl_rl_cfg
+ 
+ from isaaclab_tasks.utils import get_checkpoint_path
+ from isaaclab_tasks.utils.hydra import hydra_task_config
+@@ -125,6 +125,9 @@ def main(env_cfg: ManagerBasedRLEnvCfg | DirectRLEnvCfg | DirectMARLEnvCfg, agen
+         args_cli.max_iterations if args_cli.max_iterations is not None else agent_cfg.max_iterations
+     )
+ 
++    # handle deprecated configurations (migrates stochastic/init_noise_std fields for rsl_rl >= 5.0)
++    agent_cfg = handle_deprecated_rsl_rl_cfg(agent_cfg, installed_version)
++
+     # set the environment seed
+     # note: certain randomizations occur in the environment initialization so we set the seed here
+     env_cfg.seed = agent_cfg.seed
+diff --git a/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/wheeled/unitree_go2w/agents/rsl_rl_ppo_cfg.py b/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/wheeled/unitree_go2w/agents/rsl_rl_ppo_cfg.py
+index 8af41ad..21b6769 100644
+--- a/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/wheeled/unitree_go2w/agents/rsl_rl_ppo_cfg.py
++++ b/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/wheeled/unitree_go2w/agents/rsl_rl_ppo_cfg.py
+@@ -3,7 +3,7 @@
+ 
+ from isaaclab.utils import configclass
+ 
+-from isaaclab_rl.rsl_rl import RslRlOnPolicyRunnerCfg, RslRlPpoActorCriticCfg, RslRlPpoAlgorithmCfg
++from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
+ 
+ 
+ @configclass
+@@ -12,13 +12,20 @@ class UnitreeGo2WRoughPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+     max_iterations = 20000
+     save_interval = 1000
+     experiment_name = "unitree_go2w_rough"
+-    policy = RslRlPpoActorCriticCfg(
+-        init_noise_std=1.0,
+-        actor_obs_normalization=False,
+-        critic_obs_normalization=False,
+-        actor_hidden_dims=[512, 256, 128],
+-        critic_hidden_dims=[512, 256, 128],
++    actor = RslRlMLPModelCfg(
++        hidden_dims=[512, 256, 128],
+         activation="elu",
++        obs_normalization=False,
++        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(
++            init_std=1.0,
++            std_type="scalar",
++        ),
++    )
++    critic = RslRlMLPModelCfg(
++        hidden_dims=[512, 256, 128],
++        activation="elu",
++        obs_normalization=False,
++        distribution_cfg=None,
+     )
+     algorithm = RslRlPpoAlgorithmCfg(
+         value_loss_coef=1.0,
+diff --git a/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/wheeled/unitree_go2w/smooth_steer_env_cfg.py b/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/wheeled/unitree_go2w/smooth_steer_env_cfg.py
+index 911b8b3..0ec5ed9 100644
+--- a/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/wheeled/unitree_go2w/smooth_steer_env_cfg.py
++++ b/source/robot_lab/robot_lab/tasks/manager_based/locomotion/velocity/config/wheeled/unitree_go2w/smooth_steer_env_cfg.py
+@@ -17,7 +17,6 @@ class UnitreeGo2WSmoothSteerEnvCfg(UnitreeGo2WFlatEnvCfg):
+         super().__post_init__()
+ 
+         self.commands.base_velocity = mdp.UniformDifferentialCommandCfg(
+-            asset_name="robot",
+             resampling_time_range=(10.0, 10.0),
+             ranges=mdp.UniformDifferentialCommandCfg.Ranges(
+                 lin_acc_x=(-2.0, 2.0),

@@ -688,6 +688,32 @@ def flat_orientation_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = Scen
     return reward
 
 
+def flat_orientation_pitch_l2(
+    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Penalize non-flat PITCH only (projected-gravity x-component), leaving roll free.
+
+    Used by the active-tilt task: the robot must stay pitch-level but is allowed to bank
+    (roll) into corners, so the full flat_orientation_l2 (roll+pitch) is replaced by this.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    reward = torch.square(wp.to_torch(asset.data.projected_gravity_b)[:, 0])
+    reward *= torch.clamp(-wp.to_torch(env.scene["robot"].data.projected_gravity_b)[:, 2], 0, 0.7) / 0.7
+    return reward
+
+
+def ang_vel_y_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """Penalize PITCH-rate only (body y-axis angular velocity), leaving roll rate free.
+
+    Active-tilt counterpart to ang_vel_xy_l2: keeps pitch damping without fighting the
+    commanded roll rate (which track_roll_rate_exp rewards).
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    reward = torch.square(wp.to_torch(asset.data.root_ang_vel_b)[:, 1])
+    reward *= torch.clamp(-wp.to_torch(env.scene["robot"].data.projected_gravity_b)[:, 2], 0, 0.7) / 0.7
+    return reward
+
+
 def track_lin_vel_x_exp(
     env: ManagerBasedRLEnv, std: float, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
