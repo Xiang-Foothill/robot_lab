@@ -18,6 +18,49 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
+def command_levels_moment(
+    env: ManagerBasedRLEnv,
+    env_ids: Sequence[int],
+    reward_term_name: str,
+    range_multiplier: Sequence[float] = (0.2, 1.0),
+    num_steps: int = 8,
+) -> torch.Tensor:
+    """Curriculum that gradually expands the yaw-moment and roll-moment command ranges.
+
+    Mirrors :func:`command_levels_ang_vel` but acts on the ``yaw_moment`` and ``roll_moment``
+    ranges of :class:`UniformMomentCommandCfg`. Starting from ``range_multiplier[0]`` of the full
+    range, the ranges expand toward ``range_multiplier[1]`` in ``num_steps`` successful episodes,
+    so the policy learns to drive/turn before it is asked to bank hard.
+    """
+    ranges = env.command_manager.get_term("base_velocity").cfg.ranges
+
+    if env.common_step_counter == 0:
+        env._orig_yaw_moment = torch.tensor(ranges.yaw_moment, device=env.device)
+        env._orig_roll_moment = torch.tensor(ranges.roll_moment, device=env.device)
+        env._init_yaw_moment = env._orig_yaw_moment * range_multiplier[0]
+        env._final_yaw_moment = env._orig_yaw_moment * range_multiplier[1]
+        env._init_roll_moment = env._orig_roll_moment * range_multiplier[0]
+        env._final_roll_moment = env._orig_roll_moment * range_multiplier[1]
+        env._delta_yaw_moment = (env._final_yaw_moment - env._init_yaw_moment) / num_steps
+        env._delta_roll_moment = (env._final_roll_moment - env._init_roll_moment) / num_steps
+        ranges.yaw_moment = env._init_yaw_moment.tolist()
+        ranges.roll_moment = env._init_roll_moment.tolist()
+
+    # update only on episode boundaries since the max command is common to all envs
+    if env.common_step_counter % env.max_episode_length == 0:
+        episode_sums = env.reward_manager._episode_sums[reward_term_name]
+        reward_term_cfg = env.reward_manager.get_term_cfg(reward_term_name)
+        if torch.mean(episode_sums[env_ids]) / env.max_episode_length_s > 0.5 * reward_term_cfg.weight:
+            new_yaw = torch.tensor(ranges.yaw_moment, device=env.device) + env._delta_yaw_moment
+            new_roll = torch.tensor(ranges.roll_moment, device=env.device) + env._delta_roll_moment
+            new_yaw = torch.clamp(new_yaw, min=env._final_yaw_moment[0], max=env._final_yaw_moment[1])
+            new_roll = torch.clamp(new_roll, min=env._final_roll_moment[0], max=env._final_roll_moment[1])
+            ranges.yaw_moment = new_yaw.tolist()
+            ranges.roll_moment = new_roll.tolist()
+
+    return torch.tensor(ranges.roll_moment[1], device=env.device)
+
+
 def command_levels_lin_vel(
     env: ManagerBasedRLEnv,
     env_ids: Sequence[int],

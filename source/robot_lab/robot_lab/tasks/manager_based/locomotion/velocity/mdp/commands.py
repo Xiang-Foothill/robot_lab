@@ -3,11 +3,14 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import torch
+import warp as wp
 
+import isaaclab.utils.math as math_utils
 from isaaclab.managers import CommandTerm, CommandTermCfg
 from isaaclab.utils import configclass
 
@@ -246,3 +249,168 @@ class UniformDifferentialCommandCfg(CommandTermCfg):
     resampling_time_range: tuple[float, float] = (10.0, 10.0)
     ranges: Ranges = Ranges()
     rel_standing_envs: float = 0.0
+
+
+class UniformMomentCommand(CommandTerm):
+    """Command generator for the paper's MPC command ``[a_x, M_psi, M_theta]``.
+
+    a_x      — longitudinal acceleration command (m/s^2)
+    M_psi    — yaw moment command (N*m)
+    M_theta  — roll moment command (N*m)
+
+    The raw 3-vector is exposed verbatim by :attr:`command` and is what the policy observes,
+    matching the paper. Internally the term integrates these commands through the paper's own
+    rigid-body model (Sec. 3) into reference body states — target speed ``v*``, target yaw rate
+    ``wz*`` and target roll angle ``theta*`` — which the setpoint-tracking reward functions read.
+    Because ``theta*`` is the *steady-state* lean produced by a sustained ``M_theta`` (the roll
+    ODE, Eq. roll), holding a bank yields a nonzero reward gradient, which is what lets the policy
+    learn to tilt (unlike commanding a roll *rate*, which is zero at a held lean).
+    """
+
+    cfg: "UniformMomentCommandCfg"
+
+    def __init__(self, cfg: "UniformMomentCommandCfg", env: ManagerBasedEnv):
+        super().__init__(cfg, env)
+        self.robot = env.scene[cfg.asset_name]
+        # raw command [a_x, M_psi, M_theta]
+        self._cmd = torch.zeros(self.num_envs, 3, device=self.device)
+        # integrated reference states
+        self._v_star = torch.zeros(self.num_envs, device=self.device)
+        self._wz_star = torch.zeros(self.num_envs, device=self.device)
+        self._theta_star = torch.zeros(self.num_envs, device=self.device)
+        self._theta_dot = torch.zeros(self.num_envs, device=self.device)
+        # paper constants
+        p = cfg.params
+        self._m, self._h = p.mass, p.cg_height
+        self._Ix, self._Iz, self._g = p.roll_inertia, p.yaw_inertia, p.gravity
+
+    def __str__(self) -> str:
+        return (
+            f"UniformMomentCommand:\n"
+            f"\ta_x:     {self.cfg.ranges.lin_accel_x}\n"
+            f"\tM_psi:   {self.cfg.ranges.yaw_moment}\n"
+            f"\tM_theta: {self.cfg.ranges.roll_moment}\n"
+        )
+
+    @property
+    def command(self) -> torch.Tensor:
+        """Raw MPC command ``[a_x, M_psi, M_theta]`` exposed to the observation. Shape (N, 3)."""
+        return self._cmd
+
+    # -- reference-state accessors for the reward functions --
+    @property
+    def v_star(self) -> torch.Tensor:
+        return self._v_star
+
+    @property
+    def wz_star(self) -> torch.Tensor:
+        return self._wz_star
+
+    @property
+    def theta_star(self) -> torch.Tensor:
+        return self._theta_star
+
+    def _measured_roll(self, env_ids_t: torch.Tensor) -> torch.Tensor:
+        quat = wp.to_torch(self.robot.data.root_quat_w)[env_ids_t]
+        roll, _, _ = math_utils.euler_xyz_from_quat(quat)
+        return math_utils.wrap_to_pi(roll)
+
+    def _resample_command(self, env_ids: Sequence[int]):
+        r = self.cfg.ranges
+        n = len(env_ids)
+        dev = self.device
+        env_ids_t = torch.as_tensor(env_ids, device=dev)
+
+        a_x = torch.empty(n, device=dev).uniform_(*r.lin_accel_x)
+        # small longitudinal-accel deadband
+        a_x = a_x * (a_x.abs() > 0.1).float()
+        m_psi = torch.empty(n, device=dev).uniform_(*r.yaw_moment)
+
+        # seed the reference states from the measured body state to avoid large startup error
+        v_meas = wp.to_torch(self.robot.data.root_lin_vel_b)[env_ids_t, 0]
+        wz_meas = wp.to_torch(self.robot.data.root_ang_vel_b)[env_ids_t, 2]
+        roll_meas = self._measured_roll(env_ids_t)
+        self._v_star[env_ids_t] = v_meas
+        self._wz_star[env_ids_t] = wz_meas
+        self._theta_star[env_ids_t] = roll_meas
+        self._theta_dot[env_ids_t] = 0.0
+
+        # Tier 3: draw M_theta near the LTR-cancelling roll moment implied by the commanded yaw.
+        # The anticipated yaw rate after a short lookahead under M_psi:
+        wz_imp = torch.clamp(
+            wz_meas + (m_psi / self._Iz) * self.cfg.corr_lookahead, -self.cfg.wz_max, self.cfg.wz_max
+        )
+        # steady-state roll moment that cancels lateral load transfer: M ~= -m*h*v*psi_dot
+        m_theta0 = -self._m * self._h * v_meas * wz_imp
+        noise = torch.empty(n, device=dev).uniform_(*r.roll_moment_noise)
+        m_theta = torch.clamp(m_theta0 + noise, r.roll_moment[0], r.roll_moment[1])
+        # keep a fraction fully uniform for coverage off the raceline manifold
+        rand_mask = torch.rand(n, device=dev) < self.cfg.p_random_roll
+        m_theta_rand = torch.empty(n, device=dev).uniform_(*r.roll_moment)
+        m_theta = torch.where(rand_mask, m_theta_rand, m_theta)
+
+        self._cmd[env_ids_t, 0] = a_x
+        self._cmd[env_ids_t, 1] = m_psi
+        self._cmd[env_ids_t, 2] = m_theta
+
+        if self.cfg.rel_standing_envs > 0.0:
+            standing = torch.rand(n, device=dev) < self.cfg.rel_standing_envs
+            self._cmd[env_ids_t[standing], :] = 0.0
+
+    def _update_command(self):
+        # integrate the raw commands into reference states using the paper's rigid-body model
+        dt = self._env.step_dt
+        a_x = self._cmd[:, 0]
+        m_psi = self._cmd[:, 1]
+        m_theta = self._cmd[:, 2]
+
+        self._v_star = torch.clamp(self._v_star + a_x * dt, self.cfg.v_min, self.cfg.v_max)
+        self._wz_star = torch.clamp(self._wz_star + (m_psi / self._Iz) * dt, -self.cfg.wz_max, self.cfg.wz_max)
+
+        # roll dynamics: I_x*theta_ddot = -m*g*h*sin(theta) - m*a_y*h*cos(theta) + M_theta
+        a_y = self._v_star * self._wz_star
+        th = self._theta_star
+        th_dd = (
+            -self._m * self._g * self._h * torch.sin(th)
+            - self._m * a_y * self._h * torch.cos(th)
+            + m_theta
+        ) / self._Ix
+        self._theta_dot = self._theta_dot + th_dd * dt
+        self._theta_star = torch.clamp(th + self._theta_dot * dt, -self.cfg.theta_max, self.cfg.theta_max)
+
+    def _update_metrics(self):
+        pass
+
+
+@configclass
+class UniformMomentCommandCfg(CommandTermCfg):
+    """Configuration for :class:`UniformMomentCommand`."""
+
+    class_type: type = UniformMomentCommand
+    asset_name: str = "robot"
+
+    @configclass
+    class Ranges:
+        lin_accel_x: tuple[float, float] = (-2.0, 2.0)  # a_x (m/s^2)
+        yaw_moment: tuple[float, float] = (-8.0, 8.0)  # M_psi (N*m)
+        roll_moment: tuple[float, float] = (-15.0, 15.0)  # M_theta (N*m), |M_theta| <= M_theta,max
+        roll_moment_noise: tuple[float, float] = (-5.0, 5.0)  # noise around the LTR-cancelling center
+
+    @configclass
+    class Params:
+        mass: float = 15.0  # m (kg)
+        cg_height: float = 0.40  # h (m)
+        roll_inertia: float = 2.5  # I_x (kg*m^2)
+        yaw_inertia: float = 2.8  # I_z (kg*m^2)
+        gravity: float = 9.81  # g (m/s^2)
+
+    ranges: Ranges = Ranges()
+    params: Params = Params()
+    resampling_time_range: tuple[float, float] = (1.5, 4.0)
+    rel_standing_envs: float = 0.05
+    p_random_roll: float = 0.25  # fraction of fully-uniform M_theta samples
+    corr_lookahead: float = 0.3  # s, yaw-rate lookahead for LTR-correlated M_theta
+    v_min: float = 0.0
+    v_max: float = 3.0
+    wz_max: float = math.pi / 3
+    theta_max: float = 0.5

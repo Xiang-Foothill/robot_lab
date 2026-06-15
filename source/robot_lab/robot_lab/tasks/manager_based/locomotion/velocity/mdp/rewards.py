@@ -738,3 +738,52 @@ def track_roll_rate_exp(
     reward = torch.exp(-error / std**2)
     reward *= torch.clamp(-wp.to_torch(env.scene["robot"].data.projected_gravity_b)[:, 2], 0, 0.7) / 0.7
     return reward
+
+
+def track_setpoint_lin_vel_exp(
+    env: ManagerBasedRLEnv, std: float, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Reward tracking of the integrated longitudinal-speed setpoint ``v*``.
+
+    The setpoint is integrated from the commanded acceleration ``a_x`` by
+    :class:`UniformMomentCommand` and read off the command term directly.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    v_star = env.command_manager.get_term(command_name).v_star
+    v_actual = wp.to_torch(asset.data.root_lin_vel_b)[:, 0]
+    error = torch.square(v_star - v_actual)
+    reward = torch.exp(-error / std**2)
+    reward *= torch.clamp(-wp.to_torch(env.scene["robot"].data.projected_gravity_b)[:, 2], 0, 0.7) / 0.7
+    return reward
+
+
+def track_setpoint_yaw_rate_exp(
+    env: ManagerBasedRLEnv, std: float, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Reward tracking of the integrated yaw-rate setpoint ``wz*`` (from the yaw moment ``M_psi``)."""
+    asset: RigidObject = env.scene[asset_cfg.name]
+    wz_star = env.command_manager.get_term(command_name).wz_star
+    wz_actual = wp.to_torch(asset.data.root_ang_vel_b)[:, 2]
+    error = torch.square(wz_star - wz_actual)
+    reward = torch.exp(-error / std**2)
+    reward *= torch.clamp(-wp.to_torch(env.scene["robot"].data.projected_gravity_b)[:, 2], 0, 0.7) / 0.7
+    return reward
+
+
+def track_setpoint_roll_exp(
+    env: ManagerBasedRLEnv, std: float, command_name: str, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Reward tracking of the integrated body-roll setpoint ``theta*`` (from the roll moment ``M_theta``).
+
+    ``theta*`` is the steady-state lean produced by the commanded roll moment via the paper's roll
+    ODE, so a sustained ``M_theta`` produces a held bank with a nonzero gradient — this is the term
+    that lets the policy learn active roll control.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    theta_star = env.command_manager.get_term(command_name).theta_star
+    roll, _, _ = math_utils.euler_xyz_from_quat(wp.to_torch(asset.data.root_quat_w))
+    roll = math_utils.wrap_to_pi(roll)
+    error = torch.square(theta_star - roll)
+    reward = torch.exp(-error / std**2)
+    reward *= torch.clamp(-wp.to_torch(env.scene["robot"].data.projected_gravity_b)[:, 2], 0, 0.7) / 0.7
+    return reward

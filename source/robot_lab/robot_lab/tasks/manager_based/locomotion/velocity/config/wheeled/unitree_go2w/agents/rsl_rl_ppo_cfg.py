@@ -71,3 +71,19 @@ class UnitreeGo2WTiltPPORunnerCfg(UnitreeGo2WSmoothSteerPPORunnerCfg):
 
         # separate experiment dir so the tilt policy never overwrites the no-tilt control group
         self.experiment_name = "unitree_go2w_tilt"
+
+
+@configclass
+class UnitreeGo2WMomentSteerPPORunnerCfg(UnitreeGo2WRoughPPORunnerCfg):
+    def __post_init__(self):
+        super().__post_init__()
+
+        # train from scratch (obs space differs from the velocity/smooth-steer tasks)
+        self.max_iterations = 8000
+        self.save_interval = 500
+        self.experiment_name = "unitree_go2w_moment_steer"
+        self.algorithm.learning_rate = 1.0e-3
+        self.algorithm.desired_kl = 0.01
+        # Tier 4: empirical observation normalization, baked into the exported jit policy
+        self.actor.obs_normalization = True
+        self.critic.obs_normalization = True

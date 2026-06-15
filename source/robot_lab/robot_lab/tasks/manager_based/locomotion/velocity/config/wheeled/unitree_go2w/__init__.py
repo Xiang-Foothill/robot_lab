@@ -50,3 +50,13 @@ gym.register(
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:UnitreeGo2WTiltPPORunnerCfg",
     },
 )
+
+gym.register(
+    id="RobotLab-Isaac-Velocity-MomentSteer-Unitree-Go2W-v0",
+    entry_point="robot_lab.tasks.manager_based.locomotion.velocity.delayed_obs_env:ManagerBasedRLEnvWithObsDelay",
+    disable_env_checker=True,
+    kwargs={
+        "env_cfg_entry_point": f"{__name__}.moment_steer_env_cfg:UnitreeGo2WMomentSteerEnvCfg",
+        "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:UnitreeGo2WMomentSteerPPORunnerCfg",
+    },
+)
