@@ -146,6 +146,13 @@ def joint_pos_rel_without_wheel(
     return joint_pos_rel
 
 
+def moment_setpoints(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
+    """Integrated reference setpoints [v*, wz*, theta*] from UniformMomentCommand, scaled to match
+    the measured-state observation scales so the policy can servo to an observable target."""
+    term = env.command_manager.get_term(command_name)
+    return torch.stack([term.v_star * 2.0, term.wz_star * 0.25, term.theta_star], dim=1)
+
+
 def phase(env: ManagerBasedRLEnv, cycle_time: float) -> torch.Tensor:
     if not hasattr(env, "episode_length_buf") or env.episode_length_buf is None:
         env.episode_length_buf = torch.zeros(env.num_envs, device=env.device, dtype=torch.long)

@@ -355,7 +355,12 @@ class UniformMomentCommand(CommandTerm):
 
         if self.cfg.rel_standing_envs > 0.0:
             standing = torch.rand(n, device=dev) < self.cfg.rel_standing_envs
-            self._cmd[env_ids_t[standing], :] = 0.0
+            standing_ids = env_ids_t[standing]
+            self._cmd[standing_ids, :] = 0.0
+            self._v_star[standing_ids] = 0.0
+            self._wz_star[standing_ids] = 0.0
+            self._theta_star[standing_ids] = 0.0
+            self._theta_dot[standing_ids] = 0.0
 
     def _update_command(self):
         # integrate the raw commands into reference states using the paper's rigid-body model
@@ -364,8 +369,20 @@ class UniformMomentCommand(CommandTerm):
         m_psi = self._cmd[:, 1]
         m_theta = self._cmd[:, 2]
 
-        self._v_star = torch.clamp(self._v_star + a_x * dt, self.cfg.v_min, self.cfg.v_max)
-        self._wz_star = torch.clamp(self._wz_star + (m_psi / self._Iz) * dt, -self.cfg.wz_max, self.cfg.wz_max)
+        # Leak the speed/yaw references toward the measured body state so they track the command
+        # but cannot drift away from what the policy observes (the raw command + measured v/wz).
+        # Without this anchor v* is an open-loop integral the actor can neither see nor reconstruct.
+        v_meas = wp.to_torch(self.robot.data.root_lin_vel_b)[:, 0]
+        wz_meas = wp.to_torch(self.robot.data.root_ang_vel_b)[:, 2]
+        lam = self.cfg.anchor_rate
+        v_int = torch.clamp(
+            self._v_star + a_x * dt - lam * (self._v_star - v_meas) * dt, self.cfg.v_min, self.cfg.v_max
+        )
+        wz_int = torch.clamp(
+            self._wz_star + (m_psi / self._Iz) * dt - lam * (self._wz_star - wz_meas) * dt,
+            -self.cfg.wz_max,
+            self.cfg.wz_max,
+        )
 
         # roll dynamics: I_x*theta_ddot = -m*g*h*sin(theta) - m*a_y*h*cos(theta) + M_theta
         a_y = self._v_star * self._wz_star
@@ -375,8 +392,19 @@ class UniformMomentCommand(CommandTerm):
             - self._m * a_y * self._h * torch.cos(th)
             + m_theta
         ) / self._Ix
-        self._theta_dot = self._theta_dot + th_dd * dt
-        self._theta_star = torch.clamp(th + self._theta_dot * dt, -self.cfg.theta_max, self.cfg.theta_max)
+        thdot_int = self._theta_dot + th_dd * dt
+        th_int = torch.clamp(th + thdot_int * dt, -self.cfg.theta_max, self.cfg.theta_max)
+
+        uncommanded = (
+            (a_x.abs() < self.cfg.cmd_deadband)
+            & (m_psi.abs() < self.cfg.cmd_deadband)
+            & (m_theta.abs() < self.cfg.cmd_deadband)
+        )
+        decay = math.exp(-dt / self.cfg.idle_decay_tau)
+        self._v_star = torch.where(uncommanded, self._v_star * decay, v_int)
+        self._wz_star = torch.where(uncommanded, self._wz_star * decay, wz_int)
+        self._theta_star = torch.where(uncommanded, self._theta_star * decay, th_int)
+        self._theta_dot = torch.where(uncommanded, self._theta_dot * decay, thdot_int)
 
     def _update_metrics(self):
         pass
@@ -410,7 +438,10 @@ class UniformMomentCommandCfg(CommandTermCfg):
     rel_standing_envs: float = 0.05
     p_random_roll: float = 0.25  # fraction of fully-uniform M_theta samples
     corr_lookahead: float = 0.3  # s, yaw-rate lookahead for LTR-correlated M_theta
+    anchor_rate: float = 4.0  # 1/s, leak pulling v*/wz* toward measured state (caps drift at ~cmd/rate)
     v_min: float = 0.0
     v_max: float = 3.0
     wz_max: float = math.pi / 3
-    theta_max: float = 0.5
+    theta_max: float = 0.2
+    cmd_deadband: float = 0.05
+    idle_decay_tau: float = 0.4

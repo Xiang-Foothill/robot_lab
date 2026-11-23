@@ -45,6 +45,17 @@ class UnitreeGo2WMomentSteerEnvCfg(UnitreeGo2WRoughEnvCfg):
         self.scene.terrain.physics_material.dynamic_friction = 1.0
 
         # ------------------------------Observations (56-d)------------------------------
+        # Actor observes the raw moment command [a_x, M_psi, M_theta] verbatim (paper-faithful, scale 1.0).
+        # It can realize these because UniformMomentCommand anchors the tracked references v*/wz* to the
+        # measured body state, so the targets stay reconstructable from (command + measured v/wz).
+        # Critic keeps the privileged integrated setpoints [v*, wz*, theta*] (not exported) to keep the
+        # value estimate well-informed.
+        self.observations.policy.velocity_commands.func = mdp.generated_commands
+        self.observations.policy.velocity_commands.params = {"command_name": "base_velocity"}
+        self.observations.policy.velocity_commands.scale = 1.0
+        self.observations.critic.velocity_commands.func = mdp.moment_setpoints
+        self.observations.critic.velocity_commands.params = {"command_name": "base_velocity"}
+        self.observations.critic.velocity_commands.scale = 1.0
         # base_lin_vel, base_ang_vel, projected_gravity, velocity_commands all kept from Rough.
         # Trim joint_pos to the 12 leg joints only (paper: q_l in R^12), no wheel-zeroing variant.
         self.observations.policy.joint_pos.func = mdp.joint_pos_rel_delayed
@@ -63,7 +74,7 @@ class UnitreeGo2WMomentSteerEnvCfg(UnitreeGo2WRoughEnvCfg):
         self.commands.base_velocity = mdp.UniformMomentCommandCfg(
             asset_name="robot",
             resampling_time_range=(1.5, 4.0),
-            rel_standing_envs=0.05,
+            rel_standing_envs=0.15,
             ranges=mdp.UniformMomentCommandCfg.Ranges(
                 lin_accel_x=(-2.0, 2.0),
                 yaw_moment=(-8.0, 8.0),
@@ -78,22 +89,22 @@ class UnitreeGo2WMomentSteerEnvCfg(UnitreeGo2WRoughEnvCfg):
         self.rewards.track_ang_vel_z_exp.weight = 0.0
         setattr(self.rewards, "track_setpoint_lin_vel_exp", RewTerm(
             func=mdp.track_setpoint_lin_vel_exp,
-            weight=3.0,
+            weight=4.0,
             params={"command_name": "base_velocity", "std": 0.25},
         ))
         setattr(self.rewards, "track_setpoint_yaw_rate_exp", RewTerm(
             func=mdp.track_setpoint_yaw_rate_exp,
-            weight=1.5,
-            params={"command_name": "base_velocity", "std": 0.30},
+            weight=6.0,
+            params={"command_name": "base_velocity", "std": 0.25},
         ))
         setattr(self.rewards, "track_setpoint_roll_exp", RewTerm(
             func=mdp.track_setpoint_roll_exp,
-            weight=3.0,  # Tier-1 boost so the lean dominates residual posture penalties
-            params={"command_name": "base_velocity", "std": 0.10},
+            weight=2.5,
+            params={"command_name": "base_velocity", "std": 0.15},
         ))
 
-        # Tier 1: decouple roll from posture — pitch-only orientation + pitch-rate, drop symmetric terms
-        self.rewards.upward.weight = 0.0
+        # pitch-only orientation + pitch-rate so the body stays upright/level but may still bank subtly
+        self.rewards.upward.weight = 3.0
         self.rewards.flat_orientation_l2.weight = 0.0
         self.rewards.ang_vel_xy_l2.weight = 0.0
         setattr(self.rewards, "flat_orientation_pitch_l2", RewTerm(
@@ -104,9 +115,18 @@ class UnitreeGo2WMomentSteerEnvCfg(UnitreeGo2WRoughEnvCfg):
             func=mdp.ang_vel_y_l2,
             weight=-0.3,
         ))
-        # Tier 1: lean-permitting symmetry — mirror front<->rear per side (blocks gait/pitch
-        # asymmetry, allows left/right roll). Replaces the diagonal mirror that fights the lean.
-        self.rewards.joint_mirror.weight = -0.05
+        setattr(self.rewards, "ang_vel_x_l2", RewTerm(
+            func=mdp.ang_vel_x_l2,
+            weight=-0.1,
+        ))
+        setattr(self.rewards, "roll_soft_limit_l2", RewTerm(
+            func=mdp.roll_soft_limit_l2,
+            weight=-10.0,
+            params={"soft_limit": 0.30},
+        ))
+        # front<->rear per-side mirror blocks fore-aft pitch wobble (porpoising) but still
+        # allows left/right asymmetry for the bank. eased back to recover lean authority.
+        self.rewards.joint_mirror.weight = -0.2
         self.rewards.joint_mirror.params["mirror_joints"] = [
             ["FR.*", "RR.*"],  # right side: front+rear mirror
             ["FL.*", "RL.*"],  # left side: front+rear mirror
@@ -118,25 +138,54 @@ class UnitreeGo2WMomentSteerEnvCfg(UnitreeGo2WRoughEnvCfg):
         self.rewards.base_height_l2.params["sensor_cfg"] = None  # flat plane, absolute height
 
         # Paper penalties (Table rl_params)
-        self.rewards.lin_vel_z_l2.weight = -2.0
+        # lin_vel_z + base_lin_acc fight the vertical porpoising that lifts wheels off the ground
+        self.rewards.lin_vel_z_l2.weight = -3.0
+        self.rewards.body_lin_acc_l2.weight = -0.001
+        self.rewards.body_lin_acc_l2.params["asset_cfg"].body_names = [self.base_link_name]
         self.rewards.joint_torques_l2.weight = -2.5e-5
         self.rewards.joint_torques_l2.params["asset_cfg"].joint_names = self.leg_joint_names
         self.rewards.joint_power.weight = -2.0e-5
         self.rewards.joint_power.params["asset_cfg"].joint_names = self.leg_joint_names
-        self.rewards.action_rate_l2.weight = -0.01
+        self.rewards.action_rate_l2.weight = -0.15
         self.rewards.undesired_contacts.weight = -12.0  # non-foot body contact (body_names set in Rough)
-        self.rewards.contact_forces.weight = -1.5e-4  # foot contact force magnitude
+        self.rewards.contact_forces.weight = 0.0
 
         # Keep joint position limits as a safety guard; zero terms outside our set.
         self.rewards.joint_pos_limits.weight = -5.0
-        self.rewards.joint_pos_penalty.weight = 0.0  # optional default-pose hold (enable if legs drift)
+        # stiffer default-pose hold (smooth_steer used -8); keeps legs rigid so the chassis
+        # rides flat instead of bouncing, while still leaving slack for the commanded lean.
+        self.rewards.joint_pos_penalty.weight = -4.0
+        self.rewards.joint_pos_penalty.params["asset_cfg"].joint_names = self.leg_joint_names
         self.rewards.stand_still.weight = 0.0
         self.rewards.wheel_vel_penalty.weight = 0.0
         self.rewards.feet_contact_without_cmd.weight = 0.0
-        self.rewards.joint_acc_l2.weight = 0.0
-        self.rewards.joint_acc_wheel_l2.weight = 0.0
-        self.rewards.joint_torques_wheel_l2.weight = 0.0
-        self.rewards.joint_vel_l2.weight = 0.0
+        setattr(self.rewards, "stand_still_setpoint", RewTerm(
+            func=mdp.stand_still_setpoint,
+            weight=-2.0,
+            params={
+                "command_name": "base_velocity",
+                "speed_threshold": 0.1,
+                "asset_cfg": SceneEntityCfg("robot", joint_names=self.leg_joint_names),
+            },
+        ))
+        setattr(self.rewards, "wheel_vel_penalty_setpoint", RewTerm(
+            func=mdp.wheel_vel_penalty_setpoint,
+            weight=-0.5,
+            params={
+                "command_name": "base_velocity",
+                "speed_threshold": 0.1,
+                "asset_cfg": SceneEntityCfg("robot", joint_names=self.wheel_joint_names),
+            },
+        ))
+        # smoothness terms from smooth_steer: damp wheel accel/torque and leg accel/vel to kill jerk
+        self.rewards.joint_acc_l2.weight = -2.5e-7
+        self.rewards.joint_acc_l2.params["asset_cfg"].joint_names = self.leg_joint_names
+        self.rewards.joint_acc_wheel_l2.weight = -2.0e-7
+        self.rewards.joint_acc_wheel_l2.params["asset_cfg"].joint_names = self.wheel_joint_names
+        self.rewards.joint_torques_wheel_l2.weight = -5.0e-4
+        self.rewards.joint_torques_wheel_l2.params["asset_cfg"].joint_names = self.wheel_joint_names
+        self.rewards.joint_vel_l2.weight = -0.05
+        self.rewards.joint_vel_l2.params["asset_cfg"].joint_names = self.leg_joint_names
         self.rewards.joint_vel_wheel_l2.weight = 0.0
 
         # ------------------------------Curriculum------------------------------
@@ -166,6 +215,10 @@ class UnitreeGo2WMomentSteerEnvCfg(UnitreeGo2WRoughEnvCfg):
                 "threshold": 1.0,
             },
         )
+        setattr(self.terminations, "bad_orientation", DoneTerm(
+            func=mdp.bad_orientation,
+            params={"limit_angle": 0.8},
+        ))
 
         # If the weight of rewards is 0, set rewards to None
         if self.__class__.__name__ == "UnitreeGo2WMomentSteerEnvCfg":

@@ -1,0 +1,229 @@
+from __future__ import annotations
+import os
+import time
+import mujoco
+import numpy as np
+from mpc import MomentMPC
+from policy_runner import DEFAULT_Q, JOINT_ORDER, PolicyRunner
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+XML = os.path.join(HERE, "assets", "go2w.xml")
+RACELINE = os.path.join(HERE, "assets", "raceline.h5")
+POLICY = os.path.join(HERE, "assets", "policy.pt")
+PLOT = os.path.join(HERE, "track_result.png")
+
+DURATION = 30.0
+V_MAX = 1.5
+TILT = True
+
+PHYS_DT = 0.005
+CONTROL_DECIMATION = 4
+PLAN_EVERY_N_CONTROL = 1
+
+
+def quat_to_yaw(q):
+    w, x, y, z = q
+    return np.arctan2(2.0 * (w * z + x * y), 1.0 - 2.0 * (y * y + z * z))
+
+
+def quat_to_roll(q):
+    w, x, y, z = q
+    return np.arctan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
+
+
+def quat_to_proj_gravity(q):
+    w, x, y, z = q
+    R = np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+    ])
+    return R.T @ np.array([0.0, 0.0, -1.0])
+
+
+def yaw_to_quat(yaw):
+    return np.array([np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)])
+
+
+class Sim:
+    def __init__(self, xml, raceline, policy_path, v_max=V_MAX, tilt=TILT):
+        self.model = mujoco.MjModel.from_xml_path(xml)
+        self.data = mujoco.MjData(self.model)
+        self.planner = MomentMPC(raceline, v_max=v_max, tilt=tilt)
+        self.runner = PolicyRunner(policy_path)
+
+        self.qpos_adr = np.array([
+            self.model.jnt_qposadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, j)]
+            for j in JOINT_ORDER])
+        self.qvel_adr = np.array([
+            self.model.jnt_dofadr[mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_JOINT, j)]
+            for j in JOINT_ORDER])
+        self.act_idx = np.array([
+            mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_ACTUATOR, f"act_{j}")
+            for j in JOINT_ORDER])
+
+        self.sens = {}
+        for name in ("imu_gyro", "imu_vel", "base_quat", "base_pos"):
+            sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, name)
+            self.sens[name] = (self.model.sensor_adr[sid], self.model.sensor_dim[sid])
+
+        import h5py
+        with h5py.File(raceline, "r") as f:
+            x = np.asarray(f["x"], dtype=float)
+            y = np.asarray(f["y"], dtype=float)
+            self.race_theta = np.asarray(f["psi"], dtype=float)
+        self.race_pts = np.column_stack((x, y))
+
+    def _sensor(self, name):
+        adr, dim = self.sens[name]
+        return self.data.sensordata[adr:adr + dim].copy()
+
+    def reset_on_track(self):
+        mujoco.mj_resetData(self.model, self.data)
+        self.data.qpos[self.qpos_adr] = DEFAULT_Q
+        x0, y0 = self.race_pts[0]
+        yaw0 = float(self.race_theta[0])
+        self.data.qpos[0:3] = [x0, y0, 0.45]
+        self.data.qpos[3:7] = yaw_to_quat(yaw0)
+        mujoco.mj_forward(self.model, self.data)
+        self.runner.reset()
+
+    def read_planner_state(self):
+        pos = self._sensor("base_pos")
+        quat = self._sensor("base_quat")
+        vbody = self._sensor("imu_vel")
+        return (float(pos[0]), float(pos[1]), quat_to_yaw(quat),
+                float(vbody[0]), quat_to_roll(quat))
+
+    def read_policy_state(self):
+        lin_vel = self._sensor("imu_vel")
+        gyro = self._sensor("imu_gyro")
+        proj_gravity = quat_to_proj_gravity(self._sensor("base_quat"))
+        jpos = self.data.qpos[self.qpos_adr].copy()
+        jvel = self.data.qvel[self.qvel_adr].copy()
+        return lin_vel, gyro, proj_gravity, jpos, jvel
+
+    def apply_action(self, action):
+        leg_q_des, wheel_dq_des = self.runner.decode(action)
+        self.data.ctrl[self.act_idx] = np.concatenate([leg_q_des, wheel_dq_des])
+
+    def run(self, duration, viewer=True, verbose=True, real_time=True):
+        n_control = int(duration / (PHYS_DT * CONTROL_DECIMATION))
+        control_dt = PHYS_DT * CONTROL_DECIMATION
+        log = {"t": [], "x": [], "y": [], "v": [], "v_ref": [], "cmd": [], "z": [],
+               "s": [], "roll": [], "theta_des": []}
+        command = np.zeros(3)
+        last_info = {"v_ref": 0.0, "s": 0.0, "theta_des": 0.0}
+
+        vh = None
+        if viewer:
+            from mujoco import viewer as mj_viewer
+            vh = mj_viewer.launch_passive(self.model, self.data)
+            base_id = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_BODY, "base")
+            if base_id >= 0:
+                vh.cam.trackbodyid = base_id
+                vh.cam.distance = 4.0
+                vh.cam.azimuth = 90.0
+                vh.cam.elevation = -25.0
+
+        self.reset_on_track()
+        wall_start = time.perf_counter()
+        try:
+            for k in range(n_control):
+                x, y, psi, v, roll = self.read_planner_state()
+                if k % PLAN_EVERY_N_CONTROL == 0:
+                    command, last_info = self.planner.plan(x, y, psi, v, roll)
+
+                lin_vel, gyro, proj_gravity, jpos, jvel = self.read_policy_state()
+                obs = self.runner.build_obs(lin_vel, gyro, proj_gravity, command, jpos, jvel)
+                action = self.runner.act(obs)
+                self.apply_action(action)
+                for _ in range(CONTROL_DECIMATION):
+                    mujoco.mj_step(self.model, self.data)
+
+                t = k * PHYS_DT * CONTROL_DECIMATION
+                log["t"].append(t)
+                log["x"].append(x)
+                log["y"].append(y)
+                log["v"].append(v)
+                log["v_ref"].append(last_info["v_ref"])
+                log["cmd"].append(command.copy())
+                log["z"].append(float(self.data.qpos[2]))
+                log["s"].append(last_info["s"])
+                log["roll"].append(roll)
+                log["theta_des"].append(last_info.get("theta_des", 0.0))
+
+                if vh is not None:
+                    vh.sync()
+                if real_time and vh is not None:
+                    lag = (k + 1) * control_dt - (time.perf_counter() - wall_start)
+                    if lag > 0:
+                        time.sleep(lag)
+                if verbose and k % 50 == 0:
+                    print(f"t={t:5.1f}s s={last_info['s']:5.2f}/{self.planner.track_length:.1f}m "
+                          f"pos=({x:5.2f},{y:5.2f}) v={v:4.2f}->{last_info['v_ref']:4.2f} "
+                          f"cmd[ax,Mpsi,Mtheta]=[{command[0]:+.2f},{command[1]:+.2f},{command[2]:+.2f}] "
+                          f"roll={np.degrees(roll):+5.1f}->{np.degrees(last_info['theta_des']):+5.1f}deg "
+                          f"z={self.data.qpos[2]:.3f}")
+                if self.data.qpos[2] < 0.15:
+                    print(f"!! base height {self.data.qpos[2]:.3f} m - robot fell at t={t:.1f}s")
+                    break
+        finally:
+            if vh is not None:
+                vh.close()
+        return {k: np.array(v) for k, v in log.items()}
+
+    def report(self, log, save_path):
+        from scipy.spatial import KDTree
+        xy = np.stack([log["x"], log["y"]], axis=1)
+        tree = KDTree(self.race_pts)
+        dists, _ = tree.query(xy)
+        s = log["s"]
+        progress = np.max(s) if len(s) else 0.0
+        wraps = np.sum(np.diff(s) < -self.planner.track_length / 2)
+        print("\n=== result ===")
+        print(f"  sim time: {log['t'][-1]:.1f} s")
+        print(f"  arclength reached: {progress:.2f} m (track {self.planner.track_length:.2f} m), lap wraps: {int(wraps)}")
+        print(f"  cross-track error: mean {dists.mean():.3f} m, max {dists.max():.3f} m")
+        print(f"  speed: mean {log['v'].mean():.2f}, max {log['v'].max():.2f} m/s")
+        print(f"  base height: mean {log['z'].mean():.3f}, min {log['z'].min():.3f} m")
+        print(f"  roll deg: measured |max| {np.degrees(np.abs(log['roll']).max()):.2f}, "
+              f"target |max| {np.degrees(np.abs(log['theta_des']).max()):.2f}")
+        try:
+            import matplotlib
+            matplotlib.use("Agg")
+            import matplotlib.pyplot as plt
+            fig, ax = plt.subplots(1, 3, figsize=(16, 5))
+            ax[0].plot(self.race_pts[:, 0], self.race_pts[:, 1], "g--", lw=1, label="raceline")
+            ax[0].plot(log["x"], log["y"], "b-", lw=1.5, label="robot")
+            ax[0].plot(log["x"][0], log["y"][0], "go", label="start")
+            ax[0].axis("equal")
+            ax[0].legend()
+            ax[0].set_title("trajectory")
+            ax[0].set_xlabel("x [m]")
+            ax[0].set_ylabel("y [m]")
+            ax[1].plot(log["t"], log["v"], label="v measured")
+            ax[1].plot(log["t"], log["v_ref"], "--", label="v ref")
+            ax[1].legend()
+            ax[1].set_title("speed [m/s]")
+            ax[1].set_xlabel("t [s]")
+            ax[2].plot(log["t"], np.degrees(log["roll"]), label="roll measured")
+            ax[2].plot(log["t"], np.degrees(log["theta_des"]), "--", label="bank target")
+            ax[2].legend()
+            ax[2].set_title("active roll [deg]")
+            ax[2].set_xlabel("t [s]")
+            fig.tight_layout()
+            fig.savefig(save_path, dpi=110)
+            print(f"  saved plot -> {save_path}")
+        except Exception as e:
+            print(f"  (plot skipped: {e})")
+
+
+def main():
+    sim = Sim(XML, RACELINE, POLICY, v_max=V_MAX, tilt=TILT)
+    log = sim.run(DURATION)
+    sim.report(log, PLOT)
+
+
+if __name__ == "__main__":
+    main()

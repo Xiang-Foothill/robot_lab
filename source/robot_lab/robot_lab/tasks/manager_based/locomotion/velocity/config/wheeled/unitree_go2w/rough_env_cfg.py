@@ -78,6 +78,7 @@ class UnitreeGo2WRoughEnvCfg(LocomotionVelocityRoughEnvCfg):
         self.scene.robot = UNITREE_GO2W_CFG.replace(prim_path="{ENV_REGEX_NS}/Robot")
         self.scene.height_scanner.prim_path = "{ENV_REGEX_NS}/Robot/Geometry/" + self.base_link_name
         self.scene.height_scanner_base.prim_path = "{ENV_REGEX_NS}/Robot/Geometry/" + self.base_link_name
+        self.scene.contact_forces.prim_path = "{ENV_REGEX_NS}/Robot/Geometry/.*"
 
         # ------------------------------Observations------------------------------
         self.observations.policy.base_ang_vel.func = mdp.base_ang_vel_delayed

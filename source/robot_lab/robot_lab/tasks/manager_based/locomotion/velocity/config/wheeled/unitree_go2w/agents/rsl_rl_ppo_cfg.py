@@ -78,12 +78,12 @@ class UnitreeGo2WMomentSteerPPORunnerCfg(UnitreeGo2WRoughPPORunnerCfg):
     def __post_init__(self):
         super().__post_init__()
 
-        # train from scratch (obs space differs from the velocity/smooth-steer tasks)
-        self.max_iterations = 8000
-        self.save_interval = 500
+        self.max_iterations = 2000
+        self.save_interval = 250
         self.experiment_name = "unitree_go2w_moment_steer"
-        self.algorithm.learning_rate = 1.0e-3
-        self.algorithm.desired_kl = 0.01
+        # lower LR + tighter KL for fine-tuning from the existing checkpoint
+        self.algorithm.learning_rate = 1.0e-4
+        self.algorithm.desired_kl = 0.005
         # Tier 4: empirical observation normalization, baked into the exported jit policy
         self.actor.obs_normalization = True
         self.critic.obs_normalization = True

@@ -1,38 +1,34 @@
 # Copyright (c) 2024-2026 Ziqi Fan
 # SPDX-License-Identifier: Apache-2.0
-"""Standalone MuJoCo test: drive the Go2W smooth-steer policy around the raceline."""
+"""Standalone MuJoCo test: drive the Go2W moment-steer policy around the paper raceline with the paper MPC."""
 
 from __future__ import annotations
 
 import argparse
+import glob
 import os
-import sys
 import time
 
 import mujoco
 import numpy as np
 
-from accel_pursuit_planner import AccelPursuitPlanner
+from mpc import MomentMPC
 from policy_runner import DEFAULT_Q, JOINT_ORDER, PolicyRunner
-
-_PLANNER_NODES = os.path.expanduser(
-    "~/go2w_planner_ws/src/planner_nodes/planner_nodes")
-if _PLANNER_NODES not in sys.path:
-    sys.path.insert(0, _PLANNER_NODES)
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 XML = os.path.join(HERE, "assets", "go2w.xml")
-# correct-size raceline (the deployed default); the old npz files were the wrong track size
-DEFAULT_RACELINE = os.path.expanduser(
-    "~/Go2w_race/Go2WRace/go2w_controllers/planners/trajectory/"
-    "casadi_dynamics_bicycle_trajectory_vx_3.2.h5")
-DEFAULT_POLICY = os.path.expanduser(
-    "~/go2w_planner_ws/data/2026-06-02_12-20-32(2)/2026-06-02_12-20-32/exported/policy.pt"
-)
+RACELINE = os.path.join(HERE, "assets", "raceline.h5")
+_POLICY_GLOB = os.path.expanduser(
+    "~/robot_lab/logs/rsl_rl/unitree_go2w_moment_steer/*/exported/policy.pt")
 
 PHYS_DT = 0.005
 CONTROL_DECIMATION = 4
 PLAN_EVERY_N_CONTROL = 5
+
+
+def latest_policy():
+    cands = sorted(glob.glob(_POLICY_GLOB))
+    return cands[-1] if cands else None
 
 
 def quat_to_yaw(q):
@@ -45,19 +41,25 @@ def quat_to_roll(q):
     return np.arctan2(2.0 * (w * x + y * z), 1.0 - 2.0 * (x * x + y * y))
 
 
+def quat_to_proj_gravity(q):
+    w, x, y, z = q
+    R = np.array([
+        [1 - 2 * (y * y + z * z), 2 * (x * y - w * z), 2 * (x * z + w * y)],
+        [2 * (x * y + w * z), 1 - 2 * (x * x + z * z), 2 * (y * z - w * x)],
+        [2 * (x * z - w * y), 2 * (y * z + w * x), 1 - 2 * (x * x + y * y)],
+    ])
+    return R.T @ np.array([0.0, 0.0, -1.0])
+
+
 def yaw_to_quat(yaw):
     return np.array([np.cos(yaw / 2), 0.0, 0.0, np.sin(yaw / 2)])
 
 
 class Sim:
-    def __init__(self, xml, raceline, policy_path, planner="pursuit", v_max=1.5, tilt=False):
+    def __init__(self, xml, raceline, policy_path, v_max=2.0, tilt=True):
         self.model = mujoco.MjModel.from_xml_path(xml)
         self.data = mujoco.MjData(self.model)
-        if planner == "mpc":
-            from fw_mpc_core import BicycleMPCAdapter
-            self.planner = BicycleMPCAdapter(raceline, v_max=v_max, tilt_enable=tilt)
-        else:
-            self.planner = AccelPursuitPlanner(raceline)
+        self.planner = MomentMPC(raceline, v_max=v_max, tilt=tilt)
         self.runner = PolicyRunner(policy_path)
 
         self.qpos_adr = np.array([
@@ -75,21 +77,12 @@ class Sim:
             sid = mujoco.mj_name2id(self.model, mujoco.mjtObj.mjOBJ_SENSOR, name)
             self.sens[name] = (self.model.sensor_adr[sid], self.model.sensor_dim[sid])
 
-        if raceline.endswith((".h5", ".hdf5")):
-            import h5py
-            with h5py.File(raceline, "r") as f:
-                x = np.asarray(f["x"], dtype=float)
-                y = np.asarray(f["y"], dtype=float)
-                self.race_theta = np.asarray(f["psi"], dtype=float)
-            self.race_pts = np.column_stack((x, y))
-            self.bound_inner = None
-            self.bound_outer = None
-        else:
-            d = np.load(raceline)
-            self.race_pts = d["pts"].astype(float)
-            self.race_theta = d["theta"].astype(float)
-            self.bound_inner = d["bound_inner"].astype(float) if "bound_inner" in d.files else None
-            self.bound_outer = d["bound_outer"].astype(float) if "bound_outer" in d.files else None
+        import h5py
+        with h5py.File(raceline, "r") as f:
+            x = np.asarray(f["x"], dtype=float)
+            y = np.asarray(f["y"], dtype=float)
+            self.race_theta = np.asarray(f["psi"], dtype=float)
+        self.race_pts = np.column_stack((x, y))
 
     def _sensor(self, name):
         adr, dim = self.sens[name]
@@ -115,12 +108,13 @@ class Sim:
     def read_policy_state(self):
         lin_vel = self._sensor("imu_vel")
         gyro = self._sensor("imu_gyro")
+        proj_gravity = quat_to_proj_gravity(self._sensor("base_quat"))
         jpos = self.data.qpos[self.qpos_adr].copy()
         jvel = self.data.qvel[self.qvel_adr].copy()
-        return lin_vel, gyro, jpos, jvel
+        return lin_vel, gyro, proj_gravity, jpos, jvel
 
-    def apply_action(self, action, lean_angle=0.0):
-        leg_q_des, wheel_dq_des = self.runner.decode(action, lean_angle)
+    def apply_action(self, action):
+        leg_q_des, wheel_dq_des = self.runner.decode(action)
         self.data.ctrl[self.act_idx] = np.concatenate([leg_q_des, wheel_dq_des])
 
     def run(self, duration, viewer=False, verbose=True, real_time=True):
@@ -150,13 +144,10 @@ class Sim:
                 if k % PLAN_EVERY_N_CONTROL == 0:
                     command, last_info = self.planner.plan(x, y, psi, v, roll)
 
-                # only apply calf lean overlay when tilt is enabled on the planner
-                tilt_on = getattr(self.planner, 'tilt_enable', False)
-                lean_angle = last_info.get("theta_des", 0.0) if tilt_on else 0.0
-                lin_vel, gyro, jpos, jvel = self.read_policy_state()
-                obs = self.runner.build_obs(lin_vel, gyro, command, jpos, jvel, lean_angle)
+                lin_vel, gyro, proj_gravity, jpos, jvel = self.read_policy_state()
+                obs = self.runner.build_obs(lin_vel, gyro, proj_gravity, command, jpos, jvel)
                 action = self.runner.act(obs)
-                self.apply_action(action, lean_angle)
+                self.apply_action(action)
                 for _ in range(CONTROL_DECIMATION):
                     mujoco.mj_step(self.model, self.data)
 
@@ -176,7 +167,8 @@ class Sim:
                 if verbose and k % 50 == 0:
                     print(f"t={t:5.1f}s  s={last_info['s']:5.2f}/{self.planner.track_length:.1f}m  "
                           f"pos=({x:5.2f},{y:5.2f})  v={v:4.2f}->{last_info['v_ref']:4.2f}  "
-                          f"cmd[vx,roll,wz]=[{command[0]:+.2f},{command[1]:+.2f},{command[2]:+.2f}]  "
+                          f"cmd[ax,Mpsi,Mtheta]=[{command[0]:+.2f},{command[1]:+.2f},{command[2]:+.2f}]  "
+                          f"roll={np.degrees(roll):+5.1f}->{np.degrees(last_info['theta_des']):+5.1f}deg  "
                           f"z={self.data.qpos[2]:.3f}")
                 if self.data.qpos[2] < 0.15:
                     print(f"!! base height {self.data.qpos[2]:.3f} m - robot fell at t={t:.1f}s")
@@ -200,17 +192,13 @@ class Sim:
         print(f"  cross-track error:   mean {dists.mean():.3f} m  max {dists.max():.3f} m")
         print(f"  speed:               mean {log['v'].mean():.2f}  max {log['v'].max():.2f} m/s")
         print(f"  base height:         mean {log['z'].mean():.3f}  min {log['z'].min():.3f} m")
-        if "roll" in log and np.any(log["theta_des"]):
-            print(f"  roll (deg):          measured |max| {np.degrees(np.abs(log['roll']).max()):.2f}  "
-                  f"target |max| {np.degrees(np.abs(log['theta_des']).max()):.2f}")
+        print(f"  roll (deg):          measured |max| {np.degrees(np.abs(log['roll']).max()):.2f}  "
+              f"target |max| {np.degrees(np.abs(log['theta_des']).max()):.2f}")
         try:
             import matplotlib
             matplotlib.use("Agg")
             import matplotlib.pyplot as plt
             fig, ax = plt.subplots(1, 3, figsize=(16, 5))
-            if self.bound_inner is not None:
-                ax[0].plot(self.bound_inner[:, 0], self.bound_inner[:, 1], "k", lw=1)
-                ax[0].plot(self.bound_outer[:, 0], self.bound_outer[:, 1], "k", lw=1, label="track")
             ax[0].plot(self.race_pts[:, 0], self.race_pts[:, 1], "g--", lw=1, label="raceline")
             ax[0].plot(log["x"], log["y"], "b-", lw=1.5, label="robot")
             ax[0].plot(log["x"][0], log["y"][0], "go", label="start")
@@ -218,17 +206,10 @@ class Sim:
             ax[0].set_xlabel("x [m]"); ax[0].set_ylabel("y [m]")
             ax[1].plot(log["t"], log["v"], label="v measured")
             ax[1].plot(log["t"], log["v_ref"], "--", label="v ref")
-            ax[1].plot(log["t"], log["cmd"][:, 0], ":", label="vx cmd")
-            ax[1].legend(); ax[1].set_title("Speed / vel cmd"); ax[1].set_xlabel("t [s]")
-            if np.any(log["theta_des"]):
-                ax[2].plot(log["t"], np.degrees(log["roll"]), label="roll measured")
-                ax[2].plot(log["t"], np.degrees(log["theta_des"]), "--", label="bank target")
-                ax[2].plot(log["t"], log["cmd"][:, 1], ":", label="roll_rate cmd")
-                ax[2].legend(); ax[2].set_title("Active tilt (deg / rad/s)"); ax[2].set_xlabel("t [s]")
-            else:
-                ax[2].plot(log["t"], dists, label="cross-track err")
-                ax[2].plot(log["t"], log["cmd"][:, 2], "--", label="wz cmd")
-                ax[2].legend(); ax[2].set_title("Tracking error / yaw cmd"); ax[2].set_xlabel("t [s]")
+            ax[1].legend(); ax[1].set_title("Speed [m/s]"); ax[1].set_xlabel("t [s]")
+            ax[2].plot(log["t"], np.degrees(log["roll"]), label="roll measured")
+            ax[2].plot(log["t"], np.degrees(log["theta_des"]), "--", label="bank target theta*")
+            ax[2].legend(); ax[2].set_title("Active roll [deg]"); ax[2].set_xlabel("t [s]")
             fig.tight_layout(); fig.savefig(save_path, dpi=110)
             print(f"  saved plot -> {save_path}")
         except Exception as e:
@@ -238,19 +219,20 @@ class Sim:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--xml", default=XML)
-    ap.add_argument("--raceline", default=DEFAULT_RACELINE)
-    ap.add_argument("--policy", default=DEFAULT_POLICY)
+    ap.add_argument("--raceline", default=RACELINE)
+    ap.add_argument("--policy", default=latest_policy())
     ap.add_argument("--duration", type=float, default=30.0)
-    ap.add_argument("--planner", choices=["pursuit", "mpc"], default="pursuit")
-    ap.add_argument("--v_max", type=float, default=1.5)
-    ap.add_argument("--tilt", action="store_true", help="enable active tilt (mpc only)")
+    ap.add_argument("--v_max", type=float, default=2.0)
+    ap.add_argument("--no_tilt", action="store_true", help="zero the roll moment (tilt-OFF baseline)")
     ap.add_argument("--viewer", action="store_true")
     ap.add_argument("--no_real_time", action="store_true")
     ap.add_argument("--plot", default=os.path.join(HERE, "track_result.png"))
     args = ap.parse_args()
 
-    sim = Sim(args.xml, args.raceline, args.policy,
-              planner=args.planner, v_max=args.v_max, tilt=args.tilt)
+    if not args.policy:
+        ap.error("no policy found; pass --policy <exported/policy.pt>")
+
+    sim = Sim(args.xml, args.raceline, args.policy, v_max=args.v_max, tilt=not args.no_tilt)
     log = sim.run(args.duration, viewer=args.viewer, real_time=not args.no_real_time)
     sim.report(log, args.plot)
 

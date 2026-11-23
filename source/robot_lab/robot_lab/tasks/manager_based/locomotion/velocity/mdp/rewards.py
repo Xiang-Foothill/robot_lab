@@ -668,7 +668,7 @@ def undesired_contacts(env: ManagerBasedRLEnv, threshold: float, sensor_cfg: Sce
     # extract the used quantities (to enable type-hinting)
     contact_sensor: ContactSensor = env.scene.sensors[sensor_cfg.name]
     # check if contact force is above threshold
-    net_contact_forces = contact_sensor.data.net_forces_w_history
+    net_contact_forces = wp.to_torch(contact_sensor.data.net_forces_w_history)
     is_contact = torch.max(torch.norm(net_contact_forces[:, :, sensor_cfg.body_ids], dim=-1), dim=1)[0] > threshold
     # sum over contacts for each environment
     reward = torch.sum(is_contact, dim=1).float()
@@ -712,6 +712,25 @@ def ang_vel_y_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntity
     reward = torch.square(wp.to_torch(asset.data.root_ang_vel_b)[:, 1])
     reward *= torch.clamp(-wp.to_torch(env.scene["robot"].data.projected_gravity_b)[:, 2], 0, 0.7) / 0.7
     return reward
+
+
+def ang_vel_x_l2(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")) -> torch.Tensor:
+    """Penalize ROLL-rate (body x-axis angular velocity) to damp fast tips while still allowing a slow bank."""
+    asset: RigidObject = env.scene[asset_cfg.name]
+    reward = torch.square(wp.to_torch(asset.data.root_ang_vel_b)[:, 0])
+    reward *= torch.clamp(-wp.to_torch(env.scene["robot"].data.projected_gravity_b)[:, 2], 0, 0.7) / 0.7
+    return reward
+
+
+def roll_soft_limit_l2(
+    env: ManagerBasedRLEnv, soft_limit: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Penalize body roll beyond ``soft_limit`` only — leaves the commanded subtle bank free, punishes rollover."""
+    asset: RigidObject = env.scene[asset_cfg.name]
+    roll, _, _ = math_utils.euler_xyz_from_quat(wp.to_torch(asset.data.root_quat_w))
+    roll = math_utils.wrap_to_pi(roll)
+    excess = torch.clamp(roll.abs() - soft_limit, min=0.0)
+    return torch.square(excess)
 
 
 def track_lin_vel_x_exp(
@@ -786,4 +805,37 @@ def track_setpoint_roll_exp(
     error = torch.square(theta_star - roll)
     reward = torch.exp(-error / std**2)
     reward *= torch.clamp(-wp.to_torch(env.scene["robot"].data.projected_gravity_b)[:, 2], 0, 0.7) / 0.7
+    return reward
+
+
+def _setpoint_still_mask(env: ManagerBasedRLEnv, command_name: str, speed_threshold: float) -> torch.Tensor:
+    """Mask of envs whose integrated speed/yaw setpoints are both below ``speed_threshold``."""
+    term = env.command_manager.get_term(command_name)
+    return (term.v_star.abs() < speed_threshold) & (term.wz_star.abs() < speed_threshold)
+
+
+def stand_still_setpoint(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    speed_threshold: float = 0.1,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Penalize joint offsets from default when the integrated setpoints ``v*``/``wz*`` are ~zero."""
+    reward = mdp.joint_deviation_l1(env, asset_cfg)
+    reward *= _setpoint_still_mask(env, command_name, speed_threshold)
+    reward *= torch.clamp(-wp.to_torch(env.scene["robot"].data.projected_gravity_b)[:, 2], 0, 0.7) / 0.7
+    return reward
+
+
+def wheel_vel_penalty_setpoint(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+    asset_cfg: SceneEntityCfg,
+    speed_threshold: float = 0.1,
+) -> torch.Tensor:
+    """Penalize wheel-joint speed when the integrated setpoints ``v*``/``wz*`` are ~zero."""
+    asset: Articulation = env.scene[asset_cfg.name]
+    joint_vel = torch.abs(wp.to_torch(asset.data.joint_vel)[:, asset_cfg.joint_ids])
+    reward = torch.sum(joint_vel, dim=1)
+    reward *= _setpoint_still_mask(env, command_name, speed_threshold)
     return reward
